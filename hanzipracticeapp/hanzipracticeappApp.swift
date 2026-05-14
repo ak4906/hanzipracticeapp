@@ -31,6 +31,7 @@ struct hanzipracticeappApp: App {
 /// being loaded (typically a few hundred milliseconds).
 private struct RootBootstrap<Content: View>: View {
     @Bindable var store: CharacterStore
+    @Environment(\.modelContext) private var modelContext
     @Query private var settings: [UserSettings]
     @ViewBuilder var content: () -> Content
 
@@ -54,8 +55,12 @@ private struct RootBootstrap<Content: View>: View {
             }
         }
         .task {
-            let preferTraditional = settings.first?.preferTraditional ?? false
-            await store.bootstrap(initialVariant: preferTraditional ? .traditional : .simplified)
+            // Guarantee a UserSettings row exists before any feature view
+            // queries it — otherwise Profile gets stuck on "Loading settings…"
+            // because @Query's first read sees an empty array and the eventual
+            // insert doesn't always re-trigger a body recompute.
+            let userSettings = UserDataController(context: modelContext).settings()
+            await store.bootstrap(initialVariant: userSettings.preferTraditional ? .traditional : .simplified)
         }
     }
 }

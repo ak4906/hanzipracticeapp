@@ -182,7 +182,12 @@ struct UserDataController {
         }
         let s = UserSettings()
         context.insert(s)
-        try? context.save()
+        context.processPendingChanges()
+        do {
+            try context.save()
+        } catch {
+            print("HanziPractice: failed to save initial UserSettings — \(error)")
+        }
         return s
     }
 }

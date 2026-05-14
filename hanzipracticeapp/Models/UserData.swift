@@ -182,7 +182,12 @@ final class UserSettings {
     /// random/quick sessions when nothing is due, and “introduce new” pools —
     /// are limited to official HSK lists up through this level (1…6).
     /// Raise as you advance; SRS cards you already own are unaffected.
-    var practiceHSKCeiling: Int = 1
+    //
+    // Note: no property-level default here. SwiftData lightweight migration
+    // doesn't always honour `Int = 1` defaults — leaving inserts in a state
+    // where `try context.save()` throws and the row never materialises, which
+    // showed up as a permanent "Loading settings…" on Profile.
+    var practiceHSKCeiling: Int
 
     init(dailyNewLimit: Int = 10,
          soundsEnabled: Bool = true,
