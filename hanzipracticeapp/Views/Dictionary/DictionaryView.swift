@@ -47,6 +47,10 @@ struct DictionaryView: View {
                     if query.isEmpty {
                         if !recents.isEmpty { recentlyViewed }
                         trendingGrid
+                            // Extra breathing room so the floating
+                            // Write Practice CTA below isn't crowding
+                            // the bottom row of trending tiles.
+                            .padding(.bottom, 14)
                         writePracticeCTA
                     } else {
                         searchResults

@@ -24,6 +24,8 @@ struct HomeView: View {
     @Binding var dictionaryJumpToLists: Bool
 
     @State private var session: PracticeSession? = nil
+    @State private var quizSession: QuizSession? = nil
+    @Query private var quizCards: [SRSQuizCard]
 
     var body: some View {
         NavigationStack {
@@ -43,6 +45,9 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.large)
             .fullScreenCover(item: $session) { s in
                 WritingSessionView(session: s) { session = nil }
+            }
+            .fullScreenCover(item: $quizSession) { q in
+                QuizView(session: q) { quizSession = nil }
             }
             .onAppear {
                 _ = UserDataController(context: modelContext).settings()
@@ -93,28 +98,32 @@ struct HomeView: View {
                 stat(label: "Learning", value: "\(learning)")
                 stat(label: "Streak", value: "\(currentStreak)d")
             }
+            // Primary action — full-width writing CTA. Below it, two
+            // smaller chips kick off reading / translation review on the
+            // same due-card pool (mode-specific SRS state).
+            Button { startDueSession() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "applepencil.and.scribble")
+                    Text("Start writing")
+                }
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(Theme.accent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(Capsule().fill(Color.white))
+            }
             HStack(spacing: 10) {
-                Button { startDueSession() } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "applepencil.and.scribble")
-                        Text("Start Writing")
-                    }
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 11)
-                    .background(Capsule().fill(Color.white))
+                Button { startQuizSession(mode: .reading) } label: {
+                    todayPill(systemImage: QuizMode.reading.systemImage,
+                              title: "Reading")
+                }
+                Button { startQuizSession(mode: .translation) } label: {
+                    todayPill(systemImage: QuizMode.translation.systemImage,
+                              title: "Translation")
                 }
                 Button { selectedTab = .dictionary } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "books.vertical")
-                        Text("Browse")
-                    }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 11)
-                    .background(Capsule().stroke(Color.white.opacity(0.8), lineWidth: 1.2))
+                    todayPill(systemImage: "books.vertical",
+                              title: "Browse")
                 }
             }
         }
@@ -129,6 +138,18 @@ struct HomeView: View {
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
             }
         )
+    }
+
+    private func todayPill(systemImage: String, title: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+            Text(title)
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .background(Capsule().stroke(Color.white.opacity(0.7), lineWidth: 1.2))
     }
 
     private func stat(label: String, value: String) -> some View {
@@ -280,24 +301,16 @@ struct HomeView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
                             ForEach(lists.prefix(6)) { list in
-                                Group {
-                                    if list.effectiveEntries.isEmpty {
-                                        NavigationLink {
-                                            ListDetailView(list: list)
-                                        } label: {
-                                            listChip(list)
-                                        }
-                                        .buttonStyle(.plain)
-                                    } else {
-                                        Button {
-                                            session = PracticeSession(entries: list.effectiveEntries,
-                                                                      title: list.name)
-                                        } label: {
-                                            listChip(list)
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
+                                // Always navigate to detail — jumping
+                                // straight into practice on first tap was
+                                // disorienting because the user hadn't
+                                // seen what was in the list yet.
+                                NavigationLink {
+                                    ListDetailView(list: list)
+                                } label: {
+                                    listChip(list)
                                 }
+                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -344,11 +357,33 @@ struct HomeView: View {
 
     private func startDueSession() {
         let controller = UserDataController(context: modelContext)
-        let limit = settingsList.first?.effectiveDailyReviewLimit ?? 10
+        let settings = settingsList.first
+        let limit = settings?.effectiveDailyReviewLimit ?? 10
+        let newCap = settings?.dailyNewLimit ?? 0
         let fallbackSize = max(3, min(limit, 8))
+        // Real due cards (already-graded cards whose dueDate has passed)
+        // come first, then we top up with brand-new HSK cards within the
+        // daily-new cap so beginners with empty decks get a session that
+        // doesn't just lean on the random fallback below.
         let dueFiltered = controller.dueCards()
             .filter { characterMatchesPracticeCeiling($0.characterID) }
-        let ids = Array(dueFiltered.prefix(limit)).map(\.characterID)
+        let dueIds = Array(dueFiltered.prefix(limit)).map(\.characterID)
+        // Per-day cap: subtract cards already introduced today from the
+        // user's `dailyNewLimit` so launching multiple sessions on the
+        // same day doesn't keep introducing fresh chars past the budget.
+        let startOfToday = Calendar.current.startOfDay(for: .now)
+        let introducedToday = cards.filter { $0.dateAdded >= startOfToday }.count
+        let perDayRemaining = max(0, newCap - introducedToday)
+        let remainingSlots = max(0, limit - dueIds.count)
+        let newQuota = min(perDayRemaining, remainingSlots)
+        let knownSet = Set(cards.map(\.characterID))
+        let newIds: [String] = newQuota > 0
+            ? Array(store.officialHSKCanonicalIDs(upThrough: practiceHSKCeiling)
+                    .filter { !knownSet.contains($0) }
+                    .shuffled()
+                    .prefix(newQuota))
+            : []
+        let ids = dueIds + newIds
         let valid = store.characters(for: ids).map(\.id)
         if valid.isEmpty {
             let gentle = Array(store.officialHSKCanonicalIDs(upThrough: practiceHSKCeiling).shuffled().prefix(fallbackSize))
@@ -359,5 +394,30 @@ struct HomeView: View {
         } else {
             session = PracticeSession(characterIDs: valid, title: "Today's Review")
         }
+    }
+
+    /// Today's Review for a quiz mode. Pulls due quiz cards for the given
+    /// mode; if there aren't enough, tops up from the user's vocab lists
+    /// so the user can still get a meaningful session early on.
+    private func startQuizSession(mode: QuizMode) {
+        let controller = UserDataController(context: modelContext)
+        let settings = settingsList.first
+        let limit = settings?.effectiveDailyReviewLimit ?? 10
+        let due = controller.dueQuizCards(mode: mode)
+        var entries: [String] = Array(due.prefix(limit)).map(\.entryKey)
+        if entries.count < limit {
+            // Top up from the user's lists (entries they care about) that
+            // don't yet have a quiz card for this mode.
+            let seen = Set(entries)
+            let listPool = lists.flatMap(\.effectiveEntries)
+            let topUp = listPool
+                .filter { !seen.contains($0) }
+                .prefix(limit - entries.count)
+            entries.append(contentsOf: topUp)
+        }
+        guard !entries.isEmpty else { return }
+        quizSession = QuizSession(entries: entries,
+                                  title: "Today's Review",
+                                  mode: mode)
     }
 }

@@ -20,6 +20,11 @@ struct VocabularyListsView: View {
     @State private var showingNew: Bool = false
     @State private var showingPasteImport: Bool = false
     @State private var editMode: EditMode = .inactive
+    /// Indexes pending confirmation after the user triggers swipe-to-
+    /// delete. We don't delete immediately — the confirmation alert below
+    /// asks first, so an accidental swipe can't blow away a whole list of
+    /// progress.
+    @State private var pendingDeleteOffsets: IndexSet? = nil
 
     var body: some View {
         Group {
@@ -76,14 +81,46 @@ struct VocabularyListsView: View {
             BulkListImportSheet(lockedList: nil)
                 .presentationDetents([.large])
         }
+        .confirmationDialog(deleteConfirmationTitle,
+                            isPresented: Binding(
+                                get: { pendingDeleteOffsets != nil },
+                                set: { if !$0 { pendingDeleteOffsets = nil } }
+                            ),
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                performPendingDelete()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteOffsets = nil
+            }
+        } message: {
+            Text("This permanently removes the list. SRS progress on the individual characters is kept.")
+        }
+    }
+
+    private var deleteConfirmationTitle: String {
+        guard let offsets = pendingDeleteOffsets else { return "Delete list?" }
+        if offsets.count == 1, let i = offsets.first, lists.indices.contains(i) {
+            return "Delete \"\(lists[i].name)\"?"
+        }
+        return "Delete \(offsets.count) lists?"
     }
 
     private func deleteLists(at offsets: IndexSet) {
+        // Defer the actual delete until the user confirms via the alert
+        // below — losing a curated list to an accidental swipe was a
+        // foot-gun the user explicitly asked us to guard against.
+        pendingDeleteOffsets = offsets
+    }
+
+    private func performPendingDelete() {
+        guard let offsets = pendingDeleteOffsets else { return }
         let controller = UserDataController(context: modelContext)
         for i in offsets {
             guard lists.indices.contains(i) else { continue }
             controller.deleteList(lists[i])
         }
+        pendingDeleteOffsets = nil
     }
 
     private func moveLists(from source: IndexSet, to destination: Int) {
@@ -149,18 +186,16 @@ struct VocabularyListsView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                HStack(spacing: 6) {
-                    ForEach(entries.prefix(6), id: \.self) { entry in
-                        Text(store.displayedWord(entry))
-                            .font(Theme.hanzi(20))
-                            .foregroundStyle(Theme.accent)
-                    }
-                    if entries.count > 6 {
-                        Text("+\(entries.count - 6)")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                // Comma-separated preview that lets the OS truncate
+                // naturally with an ellipsis when it overflows — keeps
+                // word entries readable as units (失恋, 心情, 看起来…)
+                // instead of the previous loose chip layout which
+                // visually split multi-char entries into raw glyphs.
+                Text(entries.map { store.displayedWord($0) }.joined(separator: "，"))
+                    .font(Theme.hanzi(18))
+                    .foregroundStyle(Theme.accent)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             }
         }
         .padding(14)
@@ -186,6 +221,9 @@ struct ListDetailView: View {
     /// Per-session toggle: when on, entries are shuffled before each
     /// practice run instead of going in list order.
     @State private var shuffleOnPractice: Bool = false
+    /// Word detail sheet — set when the user taps a multi-character row
+    /// so they can drill into the word's pinyin / gloss / component chars.
+    @State private var peekWord: WordEntry? = nil
 
     var body: some View {
         ScrollView {
@@ -228,6 +266,10 @@ struct ListDetailView: View {
         }
         .fullScreenCover(item: $quizSession) { q in
             QuizView(session: q) { quizSession = nil }
+        }
+        .sheet(item: $peekWord) { w in
+            WordDetailSheet(word: w)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -382,33 +424,46 @@ struct ListDetailView: View {
     }
 
     /// Display row for a multi-character word (容易). Pulls pinyin + gloss
-    /// from CC-CEDICT; tapping opens a word-detail sheet (Phase B+).
+    /// from CC-CEDICT. Tapping the row body opens the word detail sheet
+    /// (component characters, pinyin, definition); the remove button is
+    /// a sibling button so it doesn't trigger the row navigation.
     private func wordRow(_ word: String) -> some View {
         let entry = WordDictionary.shared.entry(for: word)
         return HStack(spacing: 14) {
-            Text(store.displayedWord(word))
-                .font(Theme.hanzi(28, weight: .regular))
-                .foregroundStyle(Theme.accent)
-                .frame(minWidth: 56, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
-                if let entry {
-                    Text(entry.pinyin)
-                        .font(.system(size: 15, weight: .semibold))
+            Button {
+                peekWord = entry ?? WordEntry(simplified: word,
+                                              traditional: word,
+                                              pinyin: "",
+                                              gloss: "")
+            } label: {
+                HStack(spacing: 14) {
+                    Text(store.displayedWord(word))
+                        .font(Theme.hanzi(28, weight: .regular))
                         .foregroundStyle(Theme.accent)
-                    Text(entry.firstGloss)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                } else {
-                    Text("Word")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Text("Custom entry — no dictionary match.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 56, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let entry {
+                            Text(entry.pinyin)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                            Text(entry.firstGloss)
+                                .font(.system(size: 14))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                        } else {
+                            Text("Word")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                            Text("Custom entry — no dictionary match.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
                 }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
             removeButton(for: word)
         }
         .padding(12)

@@ -133,13 +133,16 @@ private struct SettingsSections: View {
             Stepper("Today's Review size: \(settings.effectiveDailyReviewLimit)",
                     value: dailyReviewLimitBinding,
                     in: 3...50, step: 1)
+            Stepper("Daily new cards: \(settings.dailyNewLimit)",
+                    value: $settings.dailyNewLimit,
+                    in: 0...20, step: 1)
             Stepper("Chunk size: \(settings.effectivePracticeChunkSize)",
                     value: chunkSizeBinding,
                     in: 1...10, step: 1)
         } header: {
             Text("Session sizing")
         } footer: {
-            Text("Today's Review size sets how many due cards appear in one session. Chunk size groups characters during the 3-pass drill so you don't see 100 traces before the first memory test — small chunks (2–3) let you actually remember each character.")
+            Text("Today's Review size = how many due cards appear in one session. Daily new cards = how many never-seen HSK characters get introduced per session, on top of due cards (set to 0 to only review what you've started). Chunk size groups characters during the 3-pass drill so you don't see 100 traces before the first memory test.")
         }
 
         Section {

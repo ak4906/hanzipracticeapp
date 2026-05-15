@@ -51,6 +51,10 @@ struct WritingSessionView: View {
     /// Set when the user taps the pinyin / meaning row mid-session — pops
     /// open the character detail page without aborting the session.
     @State private var peekCharacter: HanziCharacter? = nil
+    /// Set when the user taps the header of a multi-character entry —
+    /// opens the word detail sheet (with components + definition) rather
+    /// than jumping straight to one character's page.
+    @State private var peekWord: WordEntry? = nil
     /// How the session sequences entries and which hint level is used on
     /// each pass. `.threePass` runs every entry three times in a row
     /// (arrow → trace → memory); `.adaptive` does a single pass with the
@@ -61,6 +65,12 @@ struct WritingSessionView: View {
     /// chunked 3-pass mode would loop the same entry back two more times
     /// because the passes for one entry aren't contiguous in `sequence`.
     @State private var skippedEntries: Set<Int> = []
+    /// Current playback order. Computed once from `practiceEntries` + the
+    /// mode's pass count + the chunk size, but **mutable** so an "Again"
+    /// grade can re-queue the failed entry at the end of the session
+    /// (Anki-style relearning queue: you keep seeing it within the
+    /// session until you get to Hard or better).
+    @State private var sequence: [(entryIndex: Int, pass: Int)] = []
 
     enum Phase: Hashable {
         case writing       // user is drawing
@@ -93,15 +103,6 @@ struct WritingSessionView: View {
         let n = practiceEntries.count
         guard n > 0 else { return raw }
         return max(1, min(raw, n))
-    }
-
-    /// Pre-built (entryIndex, pass) order for the whole session — generated
-    /// from `(entries, mode, chunkSize)`. For adaptive mode this is just a
-    /// flat single-pass walk.
-    private var sequence: [(entryIndex: Int, pass: Int)] {
-        buildSequence(passCount: practiceMode.passCount,
-                      chunkSize: chunkSize,
-                      count: practiceEntries.count)
     }
 
     /// Pure builder so `onChange(of: practiceMode)` can also compute the
@@ -219,6 +220,11 @@ struct WritingSessionView: View {
             }
             .onAppear {
                 guard !practiceEntries.isEmpty else { return }
+                if sequence.isEmpty {
+                    sequence = buildSequence(passCount: practiceMode.passCount,
+                                             chunkSize: chunkSize,
+                                             count: practiceEntries.count)
+                }
                 if canvases.isEmpty {
                     rebuildCanvasesForCurrentEntry()
                 }
@@ -230,17 +236,15 @@ struct WritingSessionView: View {
             }
             .onChange(of: practiceMode) { oldValue, _ in
                 guard !practiceEntries.isEmpty else { return }
-                // Find the entry we were on under the OLD mode/chunking and
-                // jump to that entry's pass-0 position in the new sequence.
-                // Without this the index could land out-of-bounds (e.g.
-                // switching `.threePass` → `.adaptive` shrinks the sequence
-                // by 3×) or on the wrong entry.
-                let oldSequence = buildSequence(passCount: oldValue.passCount,
-                                                chunkSize: chunkSize,
-                                                count: practiceEntries.count)
-                let priorEntry = oldSequence.indices.contains(index)
-                    ? oldSequence[index].entryIndex
+                // Rebuild under the new mode/chunking; locate the entry we
+                // were on so the user doesn't get teleported to char 0.
+                let priorEntry = sequence.indices.contains(index)
+                    ? sequence[index].entryIndex
                     : 0
+                let _ = oldValue   // silence unused-arg warning
+                sequence = buildSequence(passCount: practiceMode.passCount,
+                                         chunkSize: chunkSize,
+                                         count: practiceEntries.count)
                 if let newIdx = sequence.firstIndex(where: { $0.entryIndex == priorEntry && $0.pass == 0 }) {
                     if index != newIdx {
                         index = newIdx
@@ -275,6 +279,10 @@ struct WritingSessionView: View {
                 }
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+            }
+            .sheet(item: $peekWord) { w in
+                WordDetailSheet(word: w)
+                    .presentationDetents([.medium, .large])
             }
         }
     }
@@ -368,38 +376,28 @@ struct WritingSessionView: View {
         return "Avg \(Int(avg * 100))%"
     }
 
-    /// Header shown above the writing canvases — pinyin, meaning, and the
-    /// "Stroke N of M" indicator for the currently-active char (with its
-    /// hint-mode pill). For single-char entries tapping opens that char's
-    /// detail directly; for multi-char entries it opens a menu so the user
-    /// can pick which constituent character to inspect.
+    /// Header shown above the writing canvases. For single-char entries
+    /// tapping opens that character's detail page; for multi-char entries
+    /// it opens the *word* detail sheet (component characters, pinyin,
+    /// definition, and an "add to list" picker if the user wants), so
+    /// they get the whole-word context rather than being forced to pick
+    /// just one character to look up.
     @ViewBuilder
     private func cardHeader(for entry: PracticeEntry) -> some View {
-        let content = cardHeaderContent(for: entry)
-        if entry.characters.count > 1 {
-            Menu {
-                ForEach(Array(entry.characters.enumerated()), id: \.offset) { idx, c in
-                    Button {
-                        peekCharacter = c
-                    } label: {
-                        Label("\(c.char)  ·  \(c.pinyin)  —  \(c.meaning.firstPart)",
-                              systemImage: idx == activeCharIndex
-                                            ? "circle.inset.filled"
-                                            : "circle")
-                    }
-                }
-            } label: {
-                content
-            }
-            .buttonStyle(.plain)
-        } else {
-            Button {
+        Button {
+            if entry.characters.count > 1 {
+                peekWord = WordDictionary.shared.entry(for: entry.word)
+                    ?? WordEntry(simplified: entry.word,
+                                 traditional: entry.word,
+                                 pinyin: entryPinyin(entry),
+                                 gloss: entryMeaning(entry))
+            } else {
                 peekCharacter = entry.characters.first
-            } label: {
-                content
             }
-            .buttonStyle(.plain)
+        } label: {
+            cardHeaderContent(for: entry)
         }
+        .buttonStyle(.plain)
     }
 
     /// The visual content of the header — extracted so the Menu/Button
@@ -476,12 +474,12 @@ struct WritingSessionView: View {
         .background(Capsule().fill(color.opacity(0.15)))
     }
 
-    /// Toolbar menu lets the user choose the session-level practice mode and
-    /// — in adaptive mode only — pin the hint level for the current entry.
-    /// Hint-level pinning is hidden in 3-pass mode because each of the three
-    /// passes has a fixed hint level by design (arrow → trace → memory);
-    /// letting the user override during a "from memory" pass would silently
-    /// invalidate the pass's whole purpose.
+    /// Toolbar menu lets the user choose the session-level practice mode,
+    /// the multi-character layout (direction + canvas fit), and — in
+    /// adaptive mode only — pin the hint level for the current entry.
+    /// Layout choices mirror the Profile settings; changing them here
+    /// writes through to the same UserSettings row, so the preference
+    /// sticks across sessions.
     private var settingsMenu: some View {
         Menu {
             Section("Practice method") {
@@ -489,6 +487,22 @@ struct WritingSessionView: View {
                     ForEach(SessionPracticeMode.allCases) { mode in
                         Label(mode.displayName, systemImage: mode.systemImage)
                             .tag(mode)
+                    }
+                }
+            }
+            // Always available so the user doesn't have to back out of a
+            // single-character session just to set a preference that'll
+            // apply to the next multi-char one. (The pickers are no-ops
+            // for the current single-char session but persist for later.)
+            Section("Layout (multi-character)") {
+                Picker("Direction", selection: writingDirectionBinding) {
+                    ForEach(WritingDirection.allCases) { d in
+                        Text(d.displayName).tag(d)
+                    }
+                }
+                Picker("Canvas size", selection: canvasFitBinding) {
+                    ForEach(PracticeCanvasFit.allCases) { f in
+                        Text(f.displayName).tag(f)
                     }
                 }
             }
@@ -508,6 +522,22 @@ struct WritingSessionView: View {
             Image(systemName: "slider.horizontal.3")
                 .foregroundStyle(Theme.accent)
         }
+    }
+
+    /// Live binding to the user's writing-direction preference. Writes go
+    /// straight to the active `UserSettings` row so the change persists.
+    private var writingDirectionBinding: Binding<WritingDirection> {
+        Binding(
+            get: { settingsList.first?.effectiveWritingDirection ?? .horizontal },
+            set: { settingsList.first?.writingDirectionRaw = $0.rawValue }
+        )
+    }
+
+    private var canvasFitBinding: Binding<PracticeCanvasFit> {
+        Binding(
+            get: { settingsList.first?.effectivePracticeCanvasFit ?? .fit },
+            set: { settingsList.first?.practiceCanvasFitRaw = $0.rawValue }
+        )
     }
 
     /// Two-way binding so the hint-level picker reflects whatever's actually
@@ -902,6 +932,10 @@ struct WritingSessionView: View {
     /// trusts you can write 容 and 易 individually. We deliberately don't
     /// do this for reading/translation modes (Phase C): knowing a word's
     /// pronunciation or meaning doesn't always imply the char in isolation.
+    ///
+    /// "Again" re-queues the entry at the end of the in-session sequence
+    /// (Anki-style relearning queue) so the user keeps seeing the slipped
+    /// character until they grade it Hard or better.
     private func applyGrade(_ grade: SRSGrade, for entry: PracticeEntry) {
         let controller = UserDataController(context: modelContext)
         let card = controller.ensureCard(for: entry.word)
@@ -925,6 +959,16 @@ struct WritingSessionView: View {
                                   kind: "writing")
 
         sessionResults[entry.word] = avgAccuracy
+
+        if grade == .again {
+            // Re-queue this entry at the end of the session so it comes
+            // back after the rest. Mark with the final pass (so it's a
+            // grading step when the user reaches it again, not a warmup).
+            let entryIdx = currentEntryIndex
+            sequence.append((entryIndex: entryIdx,
+                             pass: practiceMode.passCount - 1))
+        }
+
         advance()
     }
 
@@ -990,10 +1034,12 @@ struct GradingSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(CharacterStore.self) private var store
     @State private var card: SRSCard?
-    /// Character to peek at via a `.sheet(item:)`. For multi-char entries
-    /// the header is a Menu — picking any constituent character sets this
-    /// to that char and opens its detail page.
+    /// Character to peek at — set when the header is tapped for a
+    /// single-character entry.
     @State private var peekChar: HanziCharacter? = nil
+    /// Word to peek at — set when the header is tapped for a
+    /// multi-character entry. Opens the word detail sheet.
+    @State private var peekWord: WordEntry? = nil
 
     /// Averaged accuracy across every char's canvas. Used by the SRS card
     /// preview-interval display and as the "this attempt" headline number.
@@ -1052,36 +1098,32 @@ struct GradingSheet: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+        .sheet(item: $peekWord) { w in
+            WordDetailSheet(word: w)
+                .presentationDetents([.medium, .large])
+        }
     }
 
-    /// Word-aware header content. For multi-char entries this is wrapped in
-    /// a Menu so the user can pick which constituent character to peek at;
-    /// for single-char entries the wrapper is just a Button.
+    /// Header content. Single-char entries open the character detail
+    /// directly; multi-char entries open the word detail sheet so the
+    /// user gets pinyin, definition, and a list of the component chars
+    /// (each tappable to its own detail page).
     @ViewBuilder
     private var headerContent: some View {
-        let row = headerRow
-        if entry.characters.count > 1 {
-            Menu {
-                ForEach(entry.characters) { c in
-                    Button {
-                        peekChar = c
-                    } label: {
-                        Label("\(c.char)  ·  \(c.pinyin)  —  \(c.meaning.firstPart)",
-                              systemImage: "circle")
-                    }
-                }
-            } label: {
-                row
-            }
-            .buttonStyle(.plain)
-        } else {
-            Button {
+        Button {
+            if entry.characters.count > 1 {
+                peekWord = WordDictionary.shared.entry(for: entry.word)
+                    ?? WordEntry(simplified: entry.word,
+                                 traditional: entry.word,
+                                 pinyin: pinyin,
+                                 gloss: meaning)
+            } else {
                 peekChar = entry.characters.first
-            } label: {
-                row
             }
-            .buttonStyle(.plain)
+        } label: {
+            headerRow
         }
+        .buttonStyle(.plain)
     }
 
     /// The visible row content inside the header — extracted so the Menu /

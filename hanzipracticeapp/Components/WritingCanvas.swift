@@ -289,8 +289,14 @@ struct WritingCanvas: View {
     }
 
     private func hintNextStroke(side: CGFloat) -> some View {
+        // `.trace` deliberately *doesn't* highlight which stroke comes
+        // next — at that hint level the user is expected to recall the
+        // stroke order themselves. They still see the full faint
+        // character ghost as a positioning aid. `.traceWithArrow` (and
+        // its start/end-dot pass) keeps the next-stroke fill so the
+        // "dots" pass actually has somewhere to anchor the dots.
         Group {
-            if model.hintMode.showsTemplate,
+            if model.hintMode == .traceWithArrow,
                let g = model.graphics,
                model.completedStrokes < g.strokes.count {
                 // Faded outline of the expected next stroke.

@@ -41,6 +41,8 @@ struct QuizView: View {
     @State private var skippedEntries: Set<Int> = []
     /// Sheet for tapping a constituent character to see its detail page.
     @State private var peekChar: HanziCharacter? = nil
+    /// Sheet for tapping a multi-char entry's prompt — opens word detail.
+    @State private var peekWord: WordEntry? = nil
 
     enum Phase: Hashable {
         case quizzing
@@ -150,6 +152,10 @@ struct QuizView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
             }
+            .sheet(item: $peekWord) { w in
+                WordDetailSheet(word: w)
+                    .presentationDetents([.medium, .large])
+            }
         }
     }
 
@@ -248,24 +254,24 @@ struct QuizView: View {
         )
 
         if currentCharacters.count > 1 {
-            Menu {
-                ForEach(currentCharacters) { c in
-                    Button {
-                        peekChar = c
-                    } label: {
-                        Label("\(c.char)  ·  \(c.pinyin)  —  \(c.meaning.firstPart)",
-                              systemImage: "circle")
-                    }
-                }
+            Button {
+                let entry = currentEntry ?? ""
+                peekWord = WordDictionary.shared.entry(for: entry)
+                    ?? WordEntry(simplified: entry,
+                                 traditional: entry,
+                                 pinyin: pinyin,
+                                 gloss: meaning)
             } label: {
                 card
             }
+            .buttonStyle(.plain)
         } else if let c = currentCharacters.first {
             Button {
                 peekChar = c
             } label: {
                 card
             }
+            .buttonStyle(.plain)
         } else {
             card
         }
@@ -292,25 +298,21 @@ struct QuizView: View {
     }
 
     private var revealedCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            switch session.mode {
-            case .reading:
-                Text("PINYIN")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(.secondary)
-                Text(pinyin)
-                    .font(.system(size: 28, weight: .semibold, design: .serif))
-                    .foregroundStyle(Theme.accent)
-            case .translation:
-                Text("MEANING")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(.secondary)
-                Text(meaning)
-                    .font(.system(size: 18, weight: .semibold))
-                    .multilineTextAlignment(.leading)
-            }
+        // Show both pinyin AND meaning regardless of mode — the one the
+        // user was asked to recall is emphasised, but the other is right
+        // there too. Saves them a separate dictionary lookup when they
+        // realise they knew the meaning but not the pronunciation (or
+        // vice versa).
+        VStack(alignment: .leading, spacing: 14) {
+            revealedRow(label: "PINYIN",
+                        value: pinyin,
+                        valueFont: .system(size: 28, weight: .semibold, design: .serif),
+                        emphasised: session.mode == .reading)
+            Divider()
+            revealedRow(label: "MEANING",
+                        value: meaning,
+                        valueFont: .system(size: 18, weight: .semibold),
+                        emphasised: session.mode == .translation)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
@@ -318,6 +320,23 @@ struct QuizView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Theme.accentSoft.opacity(0.5))
         )
+    }
+
+    private func revealedRow(label: String,
+                              value: String,
+                              valueFont: Font,
+                              emphasised: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(valueFont)
+                .foregroundStyle(emphasised ? Theme.accent : .primary)
+                .multilineTextAlignment(.leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var gradeButtons: some View {
