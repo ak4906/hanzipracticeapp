@@ -142,6 +142,23 @@ private struct SettingsSections: View {
             Text("Today's Review size sets how many due cards appear in one session. Chunk size groups characters during the 3-pass drill so you don't see 100 traces before the first memory test — small chunks (2–3) let you actually remember each character.")
         }
 
+        Section {
+            Picker("Writing direction", selection: writingDirectionBinding) {
+                ForEach(WritingDirection.allCases) { d in
+                    Text(d.displayName).tag(d)
+                }
+            }
+            Picker("Canvas size", selection: canvasFitBinding) {
+                ForEach(PracticeCanvasFit.allCases) { f in
+                    Text(f.displayName).tag(f)
+                }
+            }
+        } header: {
+            Text("Multi-character layout")
+        } footer: {
+            Text("Direction sets how the characters of a multi-character word (容易, 冰激凌) are laid out during writing practice. Canvas size lets you choose between fitting all the canvases on one screen, or keeping each one full size and scrolling / swiping to the next.")
+        }
+
         Section("Other") {
             Toggle("Sounds & pronunciation", isOn: $settings.soundsEnabled)
         }
@@ -158,6 +175,20 @@ private struct SettingsSections: View {
         Binding(
             get: { settings.effectivePracticeChunkSize },
             set: { settings.practiceChunkSize = $0 }
+        )
+    }
+
+    private var writingDirectionBinding: Binding<WritingDirection> {
+        Binding(
+            get: { settings.effectiveWritingDirection },
+            set: { settings.writingDirectionRaw = $0.rawValue }
+        )
+    }
+
+    private var canvasFitBinding: Binding<PracticeCanvasFit> {
+        Binding(
+            get: { settings.effectivePracticeCanvasFit },
+            set: { settings.practiceCanvasFitRaw = $0.rawValue }
         )
     }
 

@@ -370,54 +370,78 @@ struct WritingSessionView: View {
 
     /// Header shown above the writing canvases — pinyin, meaning, and the
     /// "Stroke N of M" indicator for the currently-active char (with its
-    /// hint-mode pill). Tapping the row peeks at the character/word detail.
+    /// hint-mode pill). For single-char entries tapping opens that char's
+    /// detail directly; for multi-char entries it opens a menu so the user
+    /// can pick which constituent character to inspect.
+    @ViewBuilder
     private func cardHeader(for entry: PracticeEntry) -> some View {
-        let activeChar = entry.characters.indices.contains(activeCharIndex)
-            ? entry.characters[activeCharIndex] : nil
+        let content = cardHeaderContent(for: entry)
+        if entry.characters.count > 1 {
+            Menu {
+                ForEach(Array(entry.characters.enumerated()), id: \.offset) { idx, c in
+                    Button {
+                        peekCharacter = c
+                    } label: {
+                        Label("\(c.char)  ·  \(c.pinyin)  —  \(c.meaning.firstPart)",
+                              systemImage: idx == activeCharIndex
+                                            ? "circle.inset.filled"
+                                            : "circle")
+                    }
+                }
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button {
+                peekCharacter = entry.characters.first
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// The visual content of the header — extracted so the Menu/Button
+    /// wrappers above don't have to duplicate it.
+    @ViewBuilder
+    private func cardHeaderContent(for entry: PracticeEntry) -> some View {
         let pinyin = entryPinyin(entry)
         let meaning = entryMeaning(entry)
-        return Button {
-            // For multi-char entries we peek the currently-active char so
-            // the user can quickly check stroke order for that specific
-            // hanzi. (A word-level detail view could come later.)
-            peekCharacter = activeChar
-        } label: {
-            VStack(spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(pinyin)
-                        .font(.system(size: 22, weight: .semibold, design: .serif))
-                        .foregroundStyle(Theme.accent)
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.accent.opacity(0.6))
-                }
-                Text(meaning)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                if let active = canvases.indices.contains(activeCharIndex)
-                    ? canvases[activeCharIndex] : nil {
-                    HStack(spacing: 8) {
-                        if entry.isWord {
-                            Text("Char \(activeCharIndex + 1) of \(entry.characters.count)")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.accent)
-                        }
-                        if active.totalStrokes > 0 {
-                            Text("Stroke \(min(active.completedStrokes + 1, active.totalStrokes)) of \(active.totalStrokes)")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        hintModePill(active.hintMode)
-                    }
-                    .padding(.top, 4)
-                }
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Text(pinyin)
+                    .font(.system(size: 22, weight: .semibold, design: .serif))
+                    .foregroundStyle(Theme.accent)
+                Image(systemName: "info.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.accent.opacity(0.6))
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
+            Text(meaning)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if let active = canvases.indices.contains(activeCharIndex)
+                ? canvases[activeCharIndex] : nil {
+                HStack(spacing: 8) {
+                    if entry.isWord {
+                        Text("Char \(activeCharIndex + 1) of \(entry.characters.count)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    if active.totalStrokes > 0 {
+                        Text("Stroke \(min(active.completedStrokes + 1, active.totalStrokes)) of \(active.totalStrokes)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    hintModePill(active.hintMode)
+                }
+                .padding(.top, 4)
+            }
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
     }
 
     /// Pinyin for the whole entry. Multi-char looks up CC-CEDICT; single-char
@@ -453,7 +477,11 @@ struct WritingSessionView: View {
     }
 
     /// Toolbar menu lets the user choose the session-level practice mode and
-    /// (optionally) pin the hint level for the current character.
+    /// — in adaptive mode only — pin the hint level for the current entry.
+    /// Hint-level pinning is hidden in 3-pass mode because each of the three
+    /// passes has a fixed hint level by design (arrow → trace → memory);
+    /// letting the user override during a "from memory" pass would silently
+    /// invalidate the pass's whole purpose.
     private var settingsMenu: some View {
         Menu {
             Section("Practice method") {
@@ -464,14 +492,16 @@ struct WritingSessionView: View {
                     }
                 }
             }
-            Section("Hint level (this character)") {
-                Picker("Hint level", selection: hintModeBinding) {
-                    ForEach(WritingHintMode.allCases) { mode in
-                        Label(mode.displayName, systemImage: mode.systemImage)
-                            .tag(Optional(mode))
+            if practiceMode == .adaptive {
+                Section("Hint level (this entry)") {
+                    Picker("Hint level", selection: hintModeBinding) {
+                        ForEach(WritingHintMode.allCases) { mode in
+                            Label(mode.displayName, systemImage: mode.systemImage)
+                                .tag(Optional(mode))
+                        }
+                        Label("Auto", systemImage: "wand.and.stars")
+                            .tag(Optional<WritingHintMode>.none)
                     }
-                    Label("Auto", systemImage: "wand.and.stars")
-                        .tag(Optional<WritingHintMode>.none)
                 }
             }
         } label: {
@@ -513,25 +543,82 @@ struct WritingSessionView: View {
         return mastery >= 0.6 ? .memory : .trace
     }
 
-    /// Side-by-side row of canvases for the current entry. The active canvas
-    /// is full-opacity and accepts input; completed / pending canvases are
-    /// dimmed. When the user finishes the active canvas's last stroke we
-    /// advance `activeCharIndex` automatically.
+    /// Lay out the canvases for the current entry per the user's settings:
+    ///   * `horizontal + fit` → an HStack that shrinks to fit (was the
+    ///     Phase B default).
+    ///   * `horizontal + full` → a paged horizontal ScrollView with one
+    ///     full-size canvas per page; scroll/swipe between them.
+    ///   * `vertical + fit`   → a VStack of canvases, each shrunk
+    ///     vertically to fit alongside the rest.
+    ///   * `vertical + full`  → a vertical ScrollView; scroll down to
+    ///     reach the next char.
     @ViewBuilder
     private func canvasRow(for entry: PracticeEntry) -> some View {
         if canvases.isEmpty {
             Color.clear.aspectRatio(1, contentMode: .fit)
         } else if canvases.count == 1 {
             // Fast path for the (very common) single-character entry — no
-            // HStack overhead, full canvas size.
+            // stack overhead, full canvas size.
             singleCanvas(canvases[0], index: 0)
         } else {
-            HStack(alignment: .top, spacing: 8) {
-                ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
-                    singleCanvas(model, index: idx)
+            let direction = settingsList.first?.effectiveWritingDirection ?? .horizontal
+            let fit = settingsList.first?.effectivePracticeCanvasFit ?? .fit
+            switch (direction, fit) {
+            case (.horizontal, .fit):
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                        singleCanvas(model, index: idx)
+                    }
+                }
+                .padding(.horizontal, 8)
+            case (.horizontal, .full):
+                fullSizeScroll(axis: .horizontal)
+            case (.vertical, .fit):
+                VStack(spacing: 8) {
+                    ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                        singleCanvas(model, index: idx)
+                    }
+                }
+                .padding(.horizontal, 8)
+            case (.vertical, .full):
+                fullSizeScroll(axis: .vertical)
+            }
+        }
+    }
+
+    /// Scroll-paged layout used in "Full size" mode. Each canvas is laid
+    /// out at its natural square size and the user scrolls/swipes between
+    /// them. The active canvas is auto-scrolled into view as it changes so
+    /// the user doesn't have to chase it.
+    @ViewBuilder
+    private func fullSizeScroll(axis: Axis) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(axis == .horizontal ? .horizontal : .vertical,
+                       showsIndicators: false) {
+                if axis == .horizontal {
+                    LazyHStack(spacing: 16) {
+                        ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                            singleCanvas(model, index: idx)
+                                .containerRelativeFrame(.horizontal)
+                                .id(idx)
+                        }
+                    }
+                    .scrollTargetLayout()
+                } else {
+                    LazyVStack(spacing: 16) {
+                        ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                            singleCanvas(model, index: idx)
+                                .containerRelativeFrame(.horizontal)
+                                .id(idx)
+                        }
+                    }
+                    .scrollTargetLayout()
                 }
             }
-            .padding(.horizontal, 8)
+            .scrollTargetBehavior(.viewAligned)
+            .onChange(of: activeCharIndex) { _, new in
+                withAnimation { proxy.scrollTo(new, anchor: .center) }
+            }
         }
     }
 
@@ -809,10 +896,23 @@ struct WritingSessionView: View {
     /// Grade the current entry as a *single SRS unit* keyed by its word.
     /// Accuracy / retries are averaged across all canvases so a slip on any
     /// constituent character still penalises the word.
+    ///
+    /// For multi-character words we *also* propagate the grade to each
+    /// constituent character's SRS card — if you can write 容易, the system
+    /// trusts you can write 容 and 易 individually. We deliberately don't
+    /// do this for reading/translation modes (Phase C): knowing a word's
+    /// pronunciation or meaning doesn't always imply the char in isolation.
     private func applyGrade(_ grade: SRSGrade, for entry: PracticeEntry) {
         let controller = UserDataController(context: modelContext)
         let card = controller.ensureCard(for: entry.word)
         SRSEngine.apply(grade: grade, to: card)
+
+        if entry.isWord {
+            for char in entry.characters where char.id != entry.word {
+                let charCard = controller.ensureCard(for: char.id)
+                SRSEngine.apply(grade: grade, to: charCard)
+            }
+        }
 
         let count = max(1, canvases.count)
         let avgAccuracy = canvases.map(\.averageAccuracy).reduce(0, +) / Double(count)
@@ -890,10 +990,10 @@ struct GradingSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(CharacterStore.self) private var store
     @State private var card: SRSCard?
-    /// Optional sheet for the entry's detail page — tap the header to open.
-    /// For multi-char entries we open the *first* character; a true
-    /// word-detail screen is a future enhancement.
-    @State private var showingDetail: Bool = false
+    /// Character to peek at via a `.sheet(item:)`. For multi-char entries
+    /// the header is a Menu — picking any constituent character sets this
+    /// to that char and opens its detail page.
+    @State private var peekChar: HanziCharacter? = nil
 
     /// Averaged accuracy across every char's canvas. Used by the SRS card
     /// preview-interval display and as the "this attempt" headline number.
@@ -920,44 +1020,9 @@ struct GradingSheet: View {
         // The system drag indicator is enabled at the .sheet call site, so
         // we don't draw our own — that produced two stacked indicators.
         VStack(spacing: 16) {
-            Button {
-                showingDetail = true
-            } label: {
-                HStack(spacing: 8) {
-                    Text(entry.word)
-                        .font(Theme.hanzi(36))
-                        .foregroundStyle(Theme.accent)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                    VStack(alignment: .leading) {
-                        HStack(spacing: 4) {
-                            Text(pinyin)
-                                .font(.system(size: 16, weight: .semibold))
-                            Image(systemName: "info.circle")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.accent.opacity(0.6))
-                        }
-                        Text(meaning)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.leading)
-                            .lineLimit(2)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing) {
-                        Text("\(Int(averageAccuracy * 100))%")
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundStyle(Theme.accent)
-                        Text("accuracy")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.top, 18)
+            headerContent
+                .padding(.horizontal, 16)
+                .padding(.top, 18)
 
             strokeBreakdown
                 .padding(.horizontal, 16)
@@ -974,21 +1039,85 @@ struct GradingSheet: View {
         .onAppear {
             card = UserDataController(context: modelContext).ensureCard(for: entry.word)
         }
-        .sheet(isPresented: $showingDetail) {
+        .sheet(item: $peekChar) { c in
             NavigationStack {
-                if let first = entry.characters.first {
-                    CharacterDetailView(character: first)
-                        .toolbar {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                Button("Done") { showingDetail = false }
-                                    .font(.system(size: 15, weight: .semibold))
-                            }
+                CharacterDetailView(character: c)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { peekChar = nil }
+                                .font(.system(size: 15, weight: .semibold))
                         }
-                }
+                    }
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+    }
+
+    /// Word-aware header content. For multi-char entries this is wrapped in
+    /// a Menu so the user can pick which constituent character to peek at;
+    /// for single-char entries the wrapper is just a Button.
+    @ViewBuilder
+    private var headerContent: some View {
+        let row = headerRow
+        if entry.characters.count > 1 {
+            Menu {
+                ForEach(entry.characters) { c in
+                    Button {
+                        peekChar = c
+                    } label: {
+                        Label("\(c.char)  ·  \(c.pinyin)  —  \(c.meaning.firstPart)",
+                              systemImage: "circle")
+                    }
+                }
+            } label: {
+                row
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button {
+                peekChar = entry.characters.first
+            } label: {
+                row
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// The visible row content inside the header — extracted so the Menu /
+    /// Button wrappers above can both render it.
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Text(entry.word)
+                .font(Theme.hanzi(36))
+                .foregroundStyle(Theme.accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            VStack(alignment: .leading) {
+                HStack(spacing: 4) {
+                    Text(pinyin)
+                        .font(.system(size: 16, weight: .semibold))
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.accent.opacity(0.6))
+                }
+                Text(meaning)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2)
+            }
+            Spacer()
+            VStack(alignment: .trailing) {
+                Text("\(Int(averageAccuracy * 100))%")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                Text("accuracy")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     /// All stroke results across every canvas in the entry. For multi-char

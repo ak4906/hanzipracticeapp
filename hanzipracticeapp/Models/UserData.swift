@@ -232,21 +232,72 @@ final class UserSettings {
     /// Optional for the same migration reason as above.
     var practiceChunkSize: Int?
 
+    /// Writing direction for multi-character entries — `"horizontal"`
+    /// (left-to-right, like reading prose) or `"vertical"` (top-to-bottom,
+    /// like traditional calligraphy). Stored as a string so old rows
+    /// lightweight-migrate cleanly. Optional → nil means use the default.
+    var writingDirectionRaw: String?
+
+    /// Canvas size mode: `"fit"` (all canvases shrink to fit on screen,
+    /// best for 2-3 char words) or `"full"` (each canvas full-size,
+    /// scroll/swipe between them — better for long words).
+    var practiceCanvasFitRaw: String?
+
     init(dailyNewLimit: Int = 10,
          soundsEnabled: Bool = true,
          preferTraditional: Bool = false,
          practiceHSKCeiling: Int = 1,
          dailyReviewLimit: Int? = nil,
-         practiceChunkSize: Int? = nil) {
+         practiceChunkSize: Int? = nil,
+         writingDirectionRaw: String? = nil,
+         practiceCanvasFitRaw: String? = nil) {
         self.dailyNewLimit = dailyNewLimit
         self.soundsEnabled = soundsEnabled
         self.preferTraditional = preferTraditional
         self.practiceHSKCeiling = practiceHSKCeiling
         self.dailyReviewLimit = dailyReviewLimit
         self.practiceChunkSize = practiceChunkSize
+        self.writingDirectionRaw = writingDirectionRaw
+        self.practiceCanvasFitRaw = practiceCanvasFitRaw
     }
 
     /// Effective values with sensible fallbacks — use these from views.
     var effectiveDailyReviewLimit: Int { dailyReviewLimit ?? 10 }
     var effectivePracticeChunkSize: Int { practiceChunkSize ?? 3 }
+    var effectiveWritingDirection: WritingDirection {
+        WritingDirection(rawValue: writingDirectionRaw ?? "") ?? .horizontal
+    }
+    var effectivePracticeCanvasFit: PracticeCanvasFit {
+        PracticeCanvasFit(rawValue: practiceCanvasFitRaw ?? "") ?? .fit
+    }
+}
+
+/// Reading-order axis for multi-character writing practice.
+enum WritingDirection: String, CaseIterable, Identifiable, Sendable {
+    case horizontal
+    case vertical
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .horizontal: "Left → right"
+        case .vertical:   "Top → bottom"
+        }
+    }
+}
+
+/// How big each canvas should be in a multi-character entry.
+enum PracticeCanvasFit: String, CaseIterable, Identifiable, Sendable {
+    /// Shrink canvases so they all fit on screen at once.
+    case fit
+    /// Keep canvases at their natural size; scroll / swipe between them.
+    case full
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .fit:  "Fit all on screen"
+        case .full: "Full size (scroll)"
+        }
+    }
 }

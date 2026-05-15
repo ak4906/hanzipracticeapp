@@ -29,6 +29,10 @@ struct DictionaryView: View {
     @State private var query: String = ""
     @State private var mode: CharacterStore.SearchMode = .auto
     @State private var path: [DictionaryNav] = []
+    /// Tapping a CC-CEDICT word match opens this quick detail sheet rather
+    /// than pushing a destination — words don't (yet) have a full detail
+    /// page like characters do.
+    @State private var selectedWord: WordEntry? = nil
 
     init(jumpToLists: Binding<Bool> = .constant(false)) {
         _jumpToLists = jumpToLists
@@ -83,6 +87,10 @@ struct DictionaryView: View {
             }
             .onAppear {
                 consumeJumpToListsIfNeeded()
+            }
+            .sheet(item: $selectedWord) { word in
+                WordDetailSheet(word: word)
+                    .presentationDetents([.medium, .large])
             }
         }
     }
@@ -217,26 +225,204 @@ struct DictionaryView: View {
     // MARK: - Search results
 
     private var searchResults: some View {
-        let results = store.search(query, mode: mode)
+        // Word search is limited to the `auto` and `english`/`pinyin` modes;
+        // when the user has picked "Character" they presumably want raw
+        // hanzi matches only.
+        let words: [WordEntry] = (mode == .hanzi)
+            ? []
+            : WordDictionary.shared.search(query, limit: 20)
+        let chars = store.search(query, mode: mode)
+        let total = words.count + chars.count
         return VStack(alignment: .leading, spacing: 10) {
-            Text("\(results.count) result\(results.count == 1 ? "" : "s")")
+            Text("\(total) result\(total == 1 ? "" : "s")")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            ForEach(results) { c in
-                Button { path.append(.character(c)) } label: {
-                    HanziListRow(character: c)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Theme.card)
-                        )
+            if !words.isEmpty {
+                Text("WORDS")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                ForEach(words) { w in
+                    Button { selectedWord = w } label: {
+                        wordSearchRow(w)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Theme.card)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
-            if results.isEmpty {
+
+            if !chars.isEmpty {
+                if !words.isEmpty {
+                    Text("CHARACTERS")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 6)
+                }
+                ForEach(chars) { c in
+                    Button { path.append(.character(c)) } label: {
+                        HanziListRow(character: c)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Theme.card)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            if total == 0 {
                 ContentUnavailableView.search(text: query)
+            }
+        }
+    }
+
+    /// Word-level search row. Layout mirrors `HanziListRow` so words and
+    /// chars look at home in the same list.
+    private func wordSearchRow(_ w: WordEntry) -> some View {
+        HStack(spacing: 14) {
+            Text(w.simplified)
+                .font(Theme.hanzi(28, weight: .regular))
+                .frame(minWidth: 56, alignment: .leading)
+                .foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(w.pinyin)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                    Text("\(w.simplified.count) chars")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(w.firstGloss)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+// MARK: - Word detail (CC-CEDICT result)
+
+/// Quick detail sheet for a multi-character word picked from Dictionary
+/// search results. Until we ship a full word-detail page like
+/// `CharacterDetailView`, this gives the user enough info to confirm
+/// they've found the right word and to add it to a vocabulary list.
+struct WordDetailSheet: View {
+    let word: WordEntry
+    @Environment(\.modelContext) private var modelContext
+    @Environment(CharacterStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @Query private var lists: [VocabularyList]
+
+    @State private var newListName: String = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(alignment: .top, spacing: 14) {
+                        Text(word.simplified)
+                            .font(Theme.hanzi(48))
+                            .foregroundStyle(Theme.accent)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(word.pinyin)
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                            Text(word.gloss)
+                                .font(.system(size: 14))
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                Section("Characters") {
+                    ForEach(Array(word.simplified.enumerated()), id: \.offset) { _, ch in
+                        let id = String(ch)
+                        if let c = store.character(for: id) {
+                            NavigationLink {
+                                CharacterDetailView(character: c)
+                            } label: {
+                                HanziListRow(character: c)
+                            }
+                        } else {
+                            Text(id)
+                                .font(Theme.hanzi(24))
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+                }
+
+                Section("Add to list") {
+                    if lists.isEmpty {
+                        Text("You don't have any lists yet — create one below.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(lists) { list in
+                        Button {
+                            UserDataController(context: modelContext)
+                                .addEntry(word.simplified, to: list)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Image(systemName: list.symbol)
+                                    .foregroundStyle(Color(hex: UInt32(list.colorHex)))
+                                VStack(alignment: .leading) {
+                                    Text(list.name).font(.system(size: 15, weight: .semibold))
+                                    Text(list.entryCountSummary)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if list.effectiveEntries.contains(word.simplified) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Theme.accent)
+                                } else {
+                                    Image(systemName: "plus.circle")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .disabled(list.effectiveEntries.contains(word.simplified))
+                    }
+                }
+
+                Section("Create new list") {
+                    TextField("List name", text: $newListName)
+                    Button {
+                        let trimmed = newListName.trimmingCharacters(in: .whitespaces)
+                        guard !trimmed.isEmpty else { return }
+                        let controller = UserDataController(context: modelContext)
+                        _ = controller.createList(name: trimmed,
+                                                   detail: "Custom list",
+                                                   symbol: "bookmark.fill",
+                                                   colorHex: 0x266358,
+                                                   initial: [word.simplified])
+                        dismiss()
+                    } label: {
+                        Label("Create and add", systemImage: "plus.circle.fill")
+                    }
+                    .disabled(newListName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .navigationTitle(word.simplified)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
     }
