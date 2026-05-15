@@ -151,7 +151,7 @@ struct VocabularyListsView: View {
                 }
                 HStack(spacing: 6) {
                     ForEach(entries.prefix(6), id: \.self) { entry in
-                        Text(entry)
+                        Text(store.displayedWord(entry))
                             .font(Theme.hanzi(20))
                             .foregroundStyle(Theme.accent)
                     }
@@ -180,9 +180,10 @@ struct ListDetailView: View {
     @Environment(CharacterStore.self) private var store
 
     @State private var session: PracticeSession? = nil
+    @State private var quizSession: QuizSession? = nil
     @State private var showingAdd: Bool = false
     @State private var showingPasteImport: Bool = false
-    /// Per-session toggle: when on, characters are shuffled before each
+    /// Per-session toggle: when on, entries are shuffled before each
     /// practice run instead of going in list order.
     @State private var shuffleOnPractice: Bool = false
 
@@ -225,6 +226,9 @@ struct ListDetailView: View {
         .fullScreenCover(item: $session) { s in
             WritingSessionView(session: s) { session = nil }
         }
+        .fullScreenCover(item: $quizSession) { q in
+            QuizView(session: q) { quizSession = nil }
+        }
     }
 
     private var headerCard: some View {
@@ -254,7 +258,8 @@ struct ListDetailView: View {
     }
 
     private var practiceControls: some View {
-        VStack(spacing: 10) {
+        let disabled = list.effectiveEntries.isEmpty
+        return VStack(spacing: 10) {
             Toggle(isOn: $shuffleOnPractice) {
                 Label("Shuffle order", systemImage: "shuffle")
                     .font(.system(size: 14, weight: .semibold))
@@ -266,17 +271,15 @@ struct ListDetailView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Theme.card)
             )
-            .disabled(list.effectiveEntries.isEmpty)
-            .opacity(list.effectiveEntries.isEmpty ? 0.5 : 1)
+            .disabled(disabled)
+            .opacity(disabled ? 0.5 : 1)
 
+            // Primary "practice writing" button — full width, accent color,
+            // since writing is the deepest form of practice and the most
+            // common starting point.
             Button {
-                // Phase B: pass word-level entries directly. The session
-                // grades each entry (single char or multi-char word) as one
-                // SRS unit, with all the chars in a word shown together.
-                let entries = shuffleOnPractice
-                    ? list.effectiveEntries.shuffled()
-                    : list.effectiveEntries
-                session = PracticeSession(entries: entries, title: list.name)
+                session = PracticeSession(entries: orderedEntries(),
+                                          title: list.name)
             } label: {
                 HStack {
                     Image(systemName: "applepencil.and.scribble")
@@ -292,9 +295,49 @@ struct ListDetailView: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(list.effectiveEntries.isEmpty)
-            .opacity(list.effectiveEntries.isEmpty ? 0.5 : 1)
+            .disabled(disabled)
+            .opacity(disabled ? 0.5 : 1)
+
+            // Secondary quiz buttons — smaller, side by side. Reading +
+            // translation are independent skills, tracked on a separate
+            // SRS deck per mode (`SRSQuizCard`).
+            HStack(spacing: 10) {
+                quizButton(mode: .reading)
+                quizButton(mode: .translation)
+            }
+            .disabled(disabled)
+            .opacity(disabled ? 0.5 : 1)
         }
+    }
+
+    private func quizButton(mode: QuizMode) -> some View {
+        Button {
+            quizSession = QuizSession(entries: orderedEntries(),
+                                      title: list.name,
+                                      mode: mode)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: mode.systemImage)
+                Text(mode.displayName)
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Theme.accentSoft.opacity(0.6))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Apply the per-session shuffle toggle to the list's effective entries.
+    /// Used by both writing and quiz starts so the order policy is shared.
+    private func orderedEntries() -> [String] {
+        shuffleOnPractice
+            ? list.effectiveEntries.shuffled()
+            : list.effectiveEntries
     }
 
     /// One row per word entry. Multi-character entries (容易) get a
@@ -322,7 +365,7 @@ struct ListDetailView: View {
                     // Entry references a hanzi we don't have in the dictionary
                     // (rare but possible). Still let the user remove it.
                     HStack {
-                        Text(entry)
+                        Text(store.displayedWord(entry))
                             .font(Theme.hanzi(28))
                             .foregroundStyle(Theme.accent)
                         Spacer()
@@ -343,7 +386,7 @@ struct ListDetailView: View {
     private func wordRow(_ word: String) -> some View {
         let entry = WordDictionary.shared.entry(for: word)
         return HStack(spacing: 14) {
-            Text(word)
+            Text(store.displayedWord(word))
                 .font(Theme.hanzi(28, weight: .regular))
                 .foregroundStyle(Theme.accent)
                 .frame(minWidth: 56, alignment: .leading)
@@ -583,7 +626,7 @@ struct AddCharactersSheet: View {
     /// Word-level row (multi-char) drawn from CC-CEDICT.
     private func wordRow(_ w: WordEntry) -> some View {
         HStack(spacing: 12) {
-            Text(w.simplified)
+            Text(store.displayedWord(w.simplified))
                 .font(Theme.hanzi(24))
                 .foregroundStyle(Theme.accent)
                 .frame(minWidth: 44, alignment: .leading)
@@ -632,23 +675,18 @@ struct BulkListImportSheet: View {
     @State private var newListName: String = ""
     @State private var selectedListID: UUID?
 
-    /// Word-level tokens straight out of CC-CEDICT's max-matching. Multi-char
-    /// words come through as single tokens; unmatched characters fall back to
-    /// single-hanzi tokens so nothing is silently dropped.
+    /// Already canonicalised + deduped — see `wordsInOrder`'s doc-comment
+    /// for why dedupe lives there now (so 收養 (收养) annotations don't
+    /// produce three entries).
     private var orderedWords: [String] {
         VocabularyTextImport.wordsInOrder(from: pastedText,
                                           using: WordDictionary.shared)
     }
 
-    /// Dedupe by canonical (simplified) form while preserving first-seen order.
-    private var uniqueCanonicalWords: [String] {
-        VocabularyTextImport.uniqueCanonicalWords(orderedWords) { store.canonical($0) }
-    }
-
     /// Tokens we have either a dictionary entry (multi-char) or an MMA
     /// character record (single-char) for.
     private var recognizedEntries: [String] {
-        uniqueCanonicalWords.filter { token in
+        orderedWords.filter { token in
             if token.count > 1 {
                 return WordDictionary.shared.contains(token)
             }
@@ -657,7 +695,7 @@ struct BulkListImportSheet: View {
     }
 
     private var skippedUnknown: [String] {
-        uniqueCanonicalWords.filter { token in
+        orderedWords.filter { token in
             if token.count > 1 { return !WordDictionary.shared.contains(token) }
             return store.character(for: token) == nil
         }
@@ -726,13 +764,10 @@ struct BulkListImportSheet: View {
                 }
 
                 Section("Preview") {
-                    LabeledContent("Words found") {
+                    LabeledContent("Entries detected") {
                         Text("\(orderedWords.count)")
                     }
-                    LabeledContent("Unique (after dedupe)") {
-                        Text("\(uniqueCanonicalWords.count)")
-                    }
-                    LabeledContent("Recognised entries") {
+                    LabeledContent("Recognised") {
                         Text("\(recognizedEntries.count)")
                             .foregroundStyle(recognizedEntries.isEmpty ? .secondary : Theme.accent)
                             .fontWeight(.semibold)

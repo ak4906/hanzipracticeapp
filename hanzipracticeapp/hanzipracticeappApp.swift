@@ -19,6 +19,7 @@ struct hanzipracticeappApp: App {
         }
         .modelContainer(for: [
             SRSCard.self,
+            SRSQuizCard.self,
             VocabularyList.self,
             PracticeRecord.self,
             RecentLookup.self,

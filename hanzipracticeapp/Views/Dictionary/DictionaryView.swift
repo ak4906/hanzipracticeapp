@@ -288,7 +288,7 @@ struct DictionaryView: View {
     /// chars look at home in the same list.
     private func wordSearchRow(_ w: WordEntry) -> some View {
         HStack(spacing: 14) {
-            Text(w.simplified)
+            Text(store.displayedWord(w.simplified))
                 .font(Theme.hanzi(28, weight: .regular))
                 .frame(minWidth: 56, alignment: .leading)
                 .foregroundStyle(Theme.accent)
@@ -332,7 +332,7 @@ struct WordDetailSheet: View {
             List {
                 Section {
                     HStack(alignment: .top, spacing: 14) {
-                        Text(word.simplified)
+                        Text(store.displayedWord(word.simplified))
                             .font(Theme.hanzi(48))
                             .foregroundStyle(Theme.accent)
                             .lineLimit(1)
@@ -417,7 +417,7 @@ struct WordDetailSheet: View {
                     .disabled(newListName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            .navigationTitle(word.simplified)
+            .navigationTitle(store.displayedWord(word.simplified))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

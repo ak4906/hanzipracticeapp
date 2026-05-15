@@ -1088,7 +1088,7 @@ struct GradingSheet: View {
     /// Button wrappers above can both render it.
     private var headerRow: some View {
         HStack(spacing: 8) {
-            Text(entry.word)
+            Text(store.displayedWord(entry.word))
                 .font(Theme.hanzi(36))
                 .foregroundStyle(Theme.accent)
                 .lineLimit(1)

@@ -250,6 +250,9 @@ struct DangerZoneView: View {
         if let cards = try? context.fetch(FetchDescriptor<SRSCard>()) {
             for c in cards { context.delete(c) }
         }
+        if let quizCards = try? context.fetch(FetchDescriptor<SRSQuizCard>()) {
+            for c in quizCards { context.delete(c) }
+        }
         if let recs = try? context.fetch(FetchDescriptor<PracticeRecord>()) {
             for r in recs { context.delete(r) }
         }

@@ -82,6 +82,36 @@ struct UserDataController {
         (try? context.fetch(FetchDescriptor<SRSCard>())) ?? []
     }
 
+    // MARK: - Quiz cards (reading / translation)
+
+    func quizCard(for entry: String, mode: QuizMode) -> SRSQuizCard? {
+        let key = SRSQuizCard.compositeKey(entry: canonicaliseWord(entry), mode: mode)
+        let descriptor = FetchDescriptor<SRSQuizCard>(
+            predicate: #Predicate { $0.key == key }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    @discardableResult
+    func ensureQuizCard(for entry: String, mode: QuizMode) -> SRSQuizCard {
+        let canon = canonicaliseWord(entry)
+        if let existing = quizCard(for: canon, mode: mode) { return existing }
+        let new = SRSQuizCard(entryKey: canon, quizMode: mode)
+        context.insert(new)
+        try? context.save()
+        return new
+    }
+
+    /// Quiz cards due now or earlier in a given mode.
+    func dueQuizCards(mode: QuizMode, at date: Date = .now) -> [SRSQuizCard] {
+        let raw = mode.rawValue
+        let descriptor = FetchDescriptor<SRSQuizCard>(
+            predicate: #Predicate { $0.dueDate <= date && $0.quizModeRaw == raw },
+            sortBy: [SortDescriptor(\.dueDate)]
+        )
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
     // MARK: - Lists
 
     func allLists() -> [VocabularyList] {

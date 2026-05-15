@@ -24,16 +24,35 @@ enum SRSGrade: Int, CaseIterable, Identifiable {
     }
 
     /// Approximate human-friendly preview of the next interval, given a card.
-    func previewInterval(for card: SRSCard) -> String {
+    func previewInterval<C: SRSCardBackend>(for card: C) -> String {
         let next = SRSEngine.previewInterval(for: card, grade: self)
         return SRSEngine.format(interval: next)
     }
 }
 
+/// Minimal protocol for the mutable SRS fields shared by every card model.
+/// Both `SRSCard` (writing) and `SRSQuizCard` (reading / translation)
+/// conform, letting `SRSEngine.apply` run the same SM-2 update without
+/// duplicating the logic per type.
+@MainActor
+protocol SRSCardBackend: AnyObject {
+    var interval: Double { get set }
+    var ease: Double { get set }
+    var repetitions: Int { get set }
+    var dueDate: Date { get set }
+    var lastReviewed: Date? { get set }
+    var mastery: Double { get set }
+    var reviewCount: Int { get set }
+    var lapseCount: Int { get set }
+}
+
+extension SRSCard: SRSCardBackend {}
+extension SRSQuizCard: SRSCardBackend {}
+
 enum SRSEngine {
 
-    /// Apply a grade to a card, updating it in place.
-    static func apply(grade: SRSGrade, to card: SRSCard, now: Date = .now) {
+    /// Apply a grade to any SRS card, updating it in place.
+    static func apply<C: SRSCardBackend>(grade: SRSGrade, to card: C, now: Date = .now) {
         // True before we bump reviewCount — this is the very first time the
         // user is grading this card. Used to override interval logic so the
         // first review uses friendly short intervals instead of the SM-2
@@ -94,26 +113,20 @@ enum SRSEngine {
         }
     }
 
-    /// Non-mutating preview of what `apply(grade:)` would do to a card.
+    /// Non-mutating preview of what `apply(grade:)` would do to any card.
     /// Returns the resulting interval expressed in days — including sub-day
     /// values for short re-show delays (Again's 1-min, Hard's 10-min, etc.).
-    static func previewInterval(for card: SRSCard, grade: SRSGrade) -> Double {
+    static func previewInterval<C: SRSCardBackend>(for card: C,
+                                                    grade: SRSGrade) -> Double {
         let now = Date.now
-        let copy = SRSCard(characterID: card.characterID,
-                           interval: card.interval,
-                           ease: card.ease,
-                           repetitions: card.repetitions,
-                           dueDate: card.dueDate,
-                           mastery: card.mastery,
-                           reviewCount: card.reviewCount,
-                           lapseCount: card.lapseCount)
+        let copy = SimulatedCard(from: card)
         apply(grade: grade, to: copy, now: now)
         // Derive from the actual due-date diff so Again's 1-min delay isn't
         // misreported as the previous hardcoded 10-min fallback.
         return copy.dueDate.timeIntervalSince(now) / 86_400
     }
 
-    private static func newInterval(for card: SRSCard) -> Double {
+    private static func newInterval<C: SRSCardBackend>(for card: C) -> Double {
         switch card.repetitions {
         case 1: return 1
         case 2: return 3
@@ -128,6 +141,32 @@ enum SRSEngine {
         let lapses = max(1, lapseCount)
         let minutes = min(15.0, pow(2.0, Double(lapses - 1)))
         return minutes * 60
+    }
+
+    /// Throwaway class used for non-mutating previews — copies the SRS
+    /// fields off a real `SRSCardBackend` so we can run `apply` against it
+    /// without affecting the persisted card. Not a SwiftData model.
+    @MainActor
+    private final class SimulatedCard: SRSCardBackend {
+        var interval: Double
+        var ease: Double
+        var repetitions: Int
+        var dueDate: Date
+        var lastReviewed: Date?
+        var mastery: Double
+        var reviewCount: Int
+        var lapseCount: Int
+
+        init<C: SRSCardBackend>(from source: C) {
+            self.interval = source.interval
+            self.ease = source.ease
+            self.repetitions = source.repetitions
+            self.dueDate = source.dueDate
+            self.lastReviewed = source.lastReviewed
+            self.mastery = source.mastery
+            self.reviewCount = source.reviewCount
+            self.lapseCount = source.lapseCount
+        }
     }
 
     static func format(interval days: Double) -> String {

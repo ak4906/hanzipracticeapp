@@ -77,6 +77,107 @@ final class SRSCard {
     }
 }
 
+// MARK: - Quiz modes (reading / translation)
+
+/// Self-graded recall quiz over a single entry — show 容易, ask the user
+/// to recall its pinyin (reading) or English meaning (translation), reveal,
+/// then grade Again/Hard/Good/Easy. The SRS state lives in a separate
+/// model from writing because the skills are independent: you can read
+/// 容易 fluently while still struggling to write it, and vice versa.
+@Model
+final class SRSQuizCard {
+    /// Composite key — `"<entry>:<mode>"` — so SwiftData can enforce
+    /// "one card per (entry, mode)" with its single-column unique
+    /// constraint. Always set by the initialiser; never edited.
+    @Attribute(.unique) var key: String
+    /// The entry this card belongs to. Single char ("我") or word ("容易"),
+    /// always in the canonical (Simplified) form.
+    var entryKey: String
+    /// Which quiz mode this card tracks. Stored as a string so unknown
+    /// values from a future build round-trip cleanly.
+    var quizModeRaw: String
+
+    /// Days until next review.
+    var interval: Double
+    /// SM-2 ease factor.
+    var ease: Double
+    /// Successful repetitions in a row.
+    var repetitions: Int
+
+    var dueDate: Date
+    var lastReviewed: Date?
+    var dateAdded: Date
+
+    var mastery: Double
+    var reviewCount: Int
+    var lapseCount: Int
+
+    init(entryKey: String,
+         quizMode: QuizMode,
+         interval: Double = 0,
+         ease: Double = 2.5,
+         repetitions: Int = 0,
+         dueDate: Date = .now,
+         mastery: Double = 0,
+         reviewCount: Int = 0,
+         lapseCount: Int = 0) {
+        self.entryKey = entryKey
+        self.quizModeRaw = quizMode.rawValue
+        self.key = SRSQuizCard.compositeKey(entry: entryKey, mode: quizMode)
+        self.interval = interval
+        self.ease = ease
+        self.repetitions = repetitions
+        self.dueDate = dueDate
+        self.dateAdded = .now
+        self.mastery = mastery
+        self.reviewCount = reviewCount
+        self.lapseCount = lapseCount
+    }
+
+    /// Convenience constructor for the storage key used as the unique
+    /// SwiftData attribute. Public so fetches can build it without
+    /// duplicating the format string.
+    static func compositeKey(entry: String, mode: QuizMode) -> String {
+        "\(entry):\(mode.rawValue)"
+    }
+
+    var quizMode: QuizMode {
+        QuizMode(rawValue: quizModeRaw) ?? .reading
+    }
+}
+
+/// Which side of an entry's metadata the quiz asks the user to recall.
+enum QuizMode: String, CaseIterable, Identifiable, Hashable, Sendable {
+    /// Show the hanzi; recall the pinyin.
+    case reading
+    /// Show the hanzi; recall the English meaning.
+    case translation
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .reading:     "Reading"
+        case .translation: "Translation"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .reading:     "speaker.wave.2"
+        case .translation: "globe"
+        }
+    }
+
+    /// Word shown on the "tap to reveal" prompt.
+    var promptWord: String {
+        switch self {
+        case .reading:     "pinyin"
+        case .translation: "meaning"
+        }
+    }
+}
+
 // MARK: - Vocabulary lists
 
 @Model

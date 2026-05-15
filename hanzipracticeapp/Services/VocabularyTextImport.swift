@@ -55,10 +55,16 @@ nonisolated enum VocabularyTextImport {
         return runs
     }
 
-    /// Word-level tokens preserved in document order. Multi-character words
-    /// recognised by CC-CEDICT (e.g. 容易, 冰激凌) come through as single
-    /// entries; characters that don't form a known word fall through as
-    /// individual hanzi.
+    /// Word-level tokens preserved in document order, already canonicalised
+    /// to Simplified and deduped. Multi-character words recognised by
+    /// CC-CEDICT (容易, 冰激凌, …) come through as single entries; characters
+    /// that don't form a known word fall through as individual hanzi.
+    ///
+    /// Canonicalisation happens *before* tokenisation so paste text with
+    /// traditional/simplified annotations like `收養 (收养)` doesn't end up
+    /// producing three entries (收 + 养 + 收养): the 收養 run gets mapped
+    /// to 收养, then tokenises identically to the (收养) run, and the
+    /// dedupe step collapses them.
     ///
     /// Caller must pass `WordDictionary.shared` explicitly — using a default
     /// parameter here would evaluate `.shared` in a nonisolated context,
@@ -66,30 +72,39 @@ nonisolated enum VocabularyTextImport {
     @MainActor
     static func wordsInOrder(from text: String,
                              using dictionary: WordDictionary) -> [String] {
+        var seen = Set<String>()
         var out: [String] = []
         for run in hanziRuns(from: text) {
-            out.append(contentsOf: dictionary.tokenize(run))
+            let canonical = canonicaliseToSimplified(run)
+            for token in dictionary.tokenize(canonical) {
+                if seen.insert(token).inserted {
+                    out.append(token)
+                }
+            }
         }
         return out
     }
 
-    /// Dedupe word-level tokens, applying the supplied canonicaliser to
-    /// each character within each word so the simplified form is the key.
+    /// Per-character map from any variant to its canonical (Simplified)
+    /// form using the bundled OpenCC dictionaries via `VariantClassifier`.
+    /// `nonisolated final class VariantClassifier` is `@unchecked Sendable`,
+    /// so it's fine to call from this MainActor-only context.
+    @MainActor
+    private static func canonicaliseToSimplified(_ s: String) -> String {
+        String(s.map { ch -> Character in
+            let mapped = VariantClassifier.shared.canonical(String(ch))
+            return mapped.first ?? ch
+        })
+    }
+
+    /// Legacy entry point. Pre-dedupe variant of `wordsInOrder` no longer
+    /// exists, so callers that used to chain `uniqueCanonicalWords` on top
+    /// of an un-canonicalised list now get an already-deduped result from
+    /// `wordsInOrder` directly. Retained as a no-op pass-through so any
+    /// stragglers compile.
     static func uniqueCanonicalWords(_ words: [String],
                                      canonical: (String) -> String) -> [String] {
-        var seen = Set<String>()
-        seen.reserveCapacity(words.count)
-        var out: [String] = []
-        for w in words {
-            let mapped = String(w.map { c -> Character in
-                let k = canonical(String(c))
-                return k.first ?? c
-            })
-            if seen.insert(mapped).inserted {
-                out.append(mapped)
-            }
-        }
-        return out
+        words
     }
 
     private static func containsHanziScalar(_ ch: Character) -> Bool {

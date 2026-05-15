@@ -97,6 +97,21 @@ final class CharacterStore {
         VariantClassifier.shared.displayed(char, in: variant)
     }
 
+    /// Word-level variant mapping. Each character in `word` is run through
+    /// the per-character OpenCC map, so a canonical-Simplified entry like
+    /// "学习" renders as "學習" in Traditional mode without us needing a
+    /// separate word-level mapping table. Used everywhere a vocab-list
+    /// entry's raw key is rendered (list rows, practice header, quiz card).
+    func displayedWord(_ word: String) -> String {
+        if word.count == 1 { return displayed(word) }
+        let classifier = VariantClassifier.shared
+        let v = variant
+        return String(word.map { ch -> Character in
+            let mapped = classifier.displayed(String(ch), in: v)
+            return mapped.first ?? ch
+        })
+    }
+
     // MARK: - Loading
 
     /// Loads MMA data + builds the search index on a background task.
