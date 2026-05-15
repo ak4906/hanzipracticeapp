@@ -270,14 +270,13 @@ struct ListDetailView: View {
             .opacity(list.effectiveEntries.isEmpty ? 0.5 : 1)
 
             Button {
-                // Phase A: flatten word entries (容易) to individual characters
-                // for the existing writing session. Phase B will introduce
-                // word-as-unit practice via PracticeSession entries.
+                // Phase B: pass word-level entries directly. The session
+                // grades each entry (single char or multi-char word) as one
+                // SRS unit, with all the chars in a word shown together.
                 let entries = shuffleOnPractice
                     ? list.effectiveEntries.shuffled()
                     : list.effectiveEntries
-                let chars = entries.flatMap { entry in entry.map { String($0) } }
-                session = PracticeSession(characterIDs: chars, title: list.name)
+                session = PracticeSession(entries: entries, title: list.name)
             } label: {
                 HStack {
                     Image(systemName: "applepencil.and.scribble")

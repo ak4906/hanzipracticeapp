@@ -222,7 +222,7 @@ struct PracticeView: View {
                             .buttonStyle(.plain)
                         } else {
                             Button {
-                                session = PracticeSession(characterIDs: list.flattenedCharacters,
+                                session = PracticeSession(entries: list.effectiveEntries,
                                                           title: list.name)
                             } label: {
                                 listRow(list)
@@ -328,8 +328,27 @@ struct PracticeView: View {
 
 // MARK: - Session value
 
+/// A queue of items to practise. Each entry is a single practice unit —
+/// either one hanzi ("我") or a multi-character word ("容易"). The writing
+/// session shows all characters within an entry side-by-side and grades
+/// the entry as one SRS card.
 struct PracticeSession: Identifiable, Hashable {
     let id = UUID()
-    let characterIDs: [String]
+    /// Word/entry-level items. For a session of bare characters, each
+    /// string in `entries` is just one hanzi.
+    let entries: [String]
     let title: String
+
+    init(entries: [String], title: String) {
+        self.entries = entries
+        self.title = title
+    }
+
+    /// Compatibility initialiser — every character becomes its own one-char
+    /// entry. Keeps the dozens of existing callers (Home's Today's Review,
+    /// PracticeView's random / new / due session builders, single-character
+    /// jumps from the dictionary) working unchanged.
+    init(characterIDs: [String], title: String) {
+        self.init(entries: characterIDs, title: title)
+    }
 }

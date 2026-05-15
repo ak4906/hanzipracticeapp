@@ -10,6 +10,19 @@
 import SwiftUI
 import SwiftData
 
+/// One practice unit — either a single hanzi or a multi-character word.
+/// The writing session shows all `characters` side-by-side, the user writes
+/// them in order, and the whole entry gets a single SRS grade keyed by
+/// `word`.
+struct PracticeEntry: Hashable {
+    /// Canonical (simplified) key — "我" for a single char, "容易" for a word.
+    let word: String
+    /// Resolved hanzi data in display order.
+    let characters: [HanziCharacter]
+
+    var isWord: Bool { characters.count > 1 }
+}
+
 struct WritingSessionView: View {
     let session: PracticeSession
     let onClose: () -> Void
@@ -19,27 +32,35 @@ struct WritingSessionView: View {
     @Query private var settingsList: [UserSettings]
 
     @State private var index: Int = 0
-    @State private var canvas: WritingCanvasModel? = nil
+    /// One canvas per character in the *current* entry. Rebuilt every time
+    /// `index` (or therefore `currentEntry`) changes.
+    @State private var canvases: [WritingCanvasModel] = []
+    /// Which character within the current entry the user is currently
+    /// writing. For single-char entries this is always 0.
+    @State private var activeCharIndex: Int = 0
     @State private var phase: Phase = .writing
     @State private var sessionStarted: Date = .now
-    @State private var sessionResults: [String: Double] = [:]   // characterID → avg accuracy
+    /// Keyed by entry word ("容易") → averaged accuracy across all chars of
+    /// the most recent attempt. Used by the progress header and the
+    /// finished-view summary.
+    @State private var sessionResults: [String: Double] = [:]
     /// Whether the user has manually overridden the auto-graduation logic
     /// for the current session. When true we respect their pick on every
-    /// new character; when false we pick based on SRS mastery.
+    /// new entry; when false we pick based on SRS mastery.
     @State private var hintModeOverride: WritingHintMode? = nil
     /// Set when the user taps the pinyin / meaning row mid-session — pops
     /// open the character detail page without aborting the session.
     @State private var peekCharacter: HanziCharacter? = nil
-    /// How the session sequences characters and which hint level is used
-    /// on each pass. `.threePass` runs every character three times in a row
+    /// How the session sequences entries and which hint level is used on
+    /// each pass. `.threePass` runs every entry three times in a row
     /// (arrow → trace → memory); `.adaptive` does a single pass with the
     /// hint level chosen by SRS mastery.
     @State private var practiceMode: SessionPracticeMode = .threePass
-    /// Character indices the user has bailed out on (via "I know this" or
+    /// Entry indices the user has bailed out on (via "I know this" or
     /// "Skip for now"). Their remaining passes are skipped — without this,
-    /// chunked 3-pass mode would loop the same character back two more times
-    /// because the passes for one character aren't contiguous in `sequence`.
-    @State private var skippedCharacters: Set<Int> = []
+    /// chunked 3-pass mode would loop the same entry back two more times
+    /// because the passes for one entry aren't contiguous in `sequence`.
+    @State private var skippedEntries: Set<Int> = []
 
     enum Phase: Hashable {
         case writing       // user is drawing
@@ -47,41 +68,46 @@ struct WritingSessionView: View {
         case finished      // whole session done
     }
 
-    private var characters: [HanziCharacter] {
-        // De-duplicate by canonical id so a list that contains both 学 and
-        // 學 only practices once when the user is in either mode.
+    /// Resolved practice queue. Each entry is one SRS unit — a single hanzi
+    /// or a multi-character word — with its constituent chars looked up in
+    /// `store`. Deduped by canonical word key.
+    private var practiceEntries: [PracticeEntry] {
         var seen = Set<String>()
-        var out: [HanziCharacter] = []
-        for id in session.characterIDs {
-            if let c = store.character(for: id), seen.insert(c.canonicalID).inserted {
-                out.append(c)
-            }
+        var out: [PracticeEntry] = []
+        for word in session.entries {
+            guard seen.insert(word).inserted else { continue }
+            let chars = word.compactMap { store.character(for: String($0)) }
+            // Skip entries where any constituent character is missing from
+            // MMA — rare but possible with very obscure hanzi.
+            guard chars.count == word.count else { continue }
+            out.append(PracticeEntry(word: word, characters: chars))
         }
         return out
     }
 
-    /// User's preferred chunk size, clamped to 1...characters.count so
+    /// User's preferred chunk size, clamped to 1...entries.count so
     /// `.threePass` interleaves passes across small batches instead of
     /// running all of pass 1 before any of pass 2.
     private var chunkSize: Int {
         let raw = settingsList.first?.effectivePracticeChunkSize ?? 3
-        guard !characters.isEmpty else { return raw }
-        return max(1, min(raw, characters.count))
+        let n = practiceEntries.count
+        guard n > 0 else { return raw }
+        return max(1, min(raw, n))
     }
 
-    /// Pre-built (charIndex, pass) order for the whole session — generated
-    /// once per (characters, mode, chunkSize) triple. For adaptive mode
-    /// this is just a flat single-pass walk.
-    private var sequence: [(charIndex: Int, pass: Int)] {
+    /// Pre-built (entryIndex, pass) order for the whole session — generated
+    /// from `(entries, mode, chunkSize)`. For adaptive mode this is just a
+    /// flat single-pass walk.
+    private var sequence: [(entryIndex: Int, pass: Int)] {
         buildSequence(passCount: practiceMode.passCount,
                       chunkSize: chunkSize,
-                      count: characters.count)
+                      count: practiceEntries.count)
     }
 
     /// Pure builder so `onChange(of: practiceMode)` can also compute the
-    /// sequence under the *previous* mode and find the character we were on.
+    /// sequence under the *previous* mode and find the entry we were on.
     private func buildSequence(passCount: Int, chunkSize: Int, count: Int)
-        -> [(charIndex: Int, pass: Int)]
+        -> [(entryIndex: Int, pass: Int)]
     {
         guard count > 0 else { return [] }
         let cs = max(1, min(chunkSize, count))
@@ -101,10 +127,10 @@ struct WritingSessionView: View {
     /// Total steps until the session is "finished".
     private var totalSteps: Int { sequence.count }
 
-    /// Which character we're on within the current chunk/pass.
-    private var currentCharIndex: Int {
+    /// Which entry we're on within the current chunk/pass.
+    private var currentEntryIndex: Int {
         guard !sequence.isEmpty, sequence.indices.contains(min(index, sequence.count - 1)) else { return 0 }
-        return sequence[min(index, sequence.count - 1)].charIndex
+        return sequence[min(index, sequence.count - 1)].entryIndex
     }
 
     /// Which pass we're on (0..passCount-1). 0 for adaptive mode.
@@ -113,8 +139,8 @@ struct WritingSessionView: View {
         return sequence[min(index, sequence.count - 1)].pass
     }
 
-    private var current: HanziCharacter? {
-        characters.indices.contains(currentCharIndex) ? characters[currentCharIndex] : nil
+    private var currentEntry: PracticeEntry? {
+        practiceEntries.indices.contains(currentEntryIndex) ? practiceEntries[currentEntryIndex] : nil
     }
 
     /// Whether the SRS grading sheet should appear after the current step.
@@ -127,35 +153,19 @@ struct WritingSessionView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if characters.isEmpty {
+                if practiceEntries.isEmpty {
                     emptyQueueView
                 } else {
                     VStack(spacing: 16) {
                         progressHeader
                         if phase == .finished {
                             finishedView
-                        } else if let c = current {
+                        } else if let entry = currentEntry {
                             VStack(spacing: 14) {
-                                cardHeader(for: c)
-                                quickActionsRow(for: c)
-                                Group {
-                                    if let canvas {
-                                        WritingCanvas(model: canvas) { _ in
-                                            Task { @MainActor in
-                                                try? await Task.sleep(nanoseconds: 600_000_000)
-                                                if isGradingStep {
-                                                    phase = .grading
-                                                } else {
-                                                    advance()
-                                                }
-                                            }
-                                        }
-                                        .padding(.horizontal, 8)
-                                    } else {
-                                        Color.clear.aspectRatio(1, contentMode: .fit)
-                                    }
-                                }
-                                controls(for: c)
+                                cardHeader(for: entry)
+                                quickActionsRow(for: entry)
+                                canvasRow(for: entry)
+                                controls(for: entry)
                                 Spacer()
                             }
                             .padding(.horizontal, 16)
@@ -185,7 +195,7 @@ struct WritingSessionView: View {
                     Text(session.title)
                         .font(.system(size: 15, weight: .semibold))
                 }
-                if !characters.isEmpty {
+                if !practiceEntries.isEmpty {
                     ToolbarItem(placement: .topBarTrailing) {
                         HStack(spacing: 14) {
                             // Always visible (not just after a card is graded)
@@ -208,48 +218,45 @@ struct WritingSessionView: View {
                 }
             }
             .onAppear {
-                guard !characters.isEmpty else { return }
-                if canvas == nil, let c = current {
-                    canvas = WritingCanvasModel(character: c,
-                                                hintMode: defaultHintMode(for: c))
+                guard !practiceEntries.isEmpty else { return }
+                if canvases.isEmpty {
+                    rebuildCanvasesForCurrentEntry()
                 }
             }
             .onChange(of: index) { _, _ in
-                guard !characters.isEmpty else { return }
-                if let c = current {
-                    canvas = WritingCanvasModel(character: c,
-                                                hintMode: defaultHintMode(for: c))
-                }
+                guard !practiceEntries.isEmpty else { return }
+                rebuildCanvasesForCurrentEntry()
                 phase = .writing
             }
             .onChange(of: practiceMode) { oldValue, _ in
-                guard !characters.isEmpty else { return }
-                // Find the character we were on under the OLD mode/chunking
-                // and jump to that character's pass-0 entry in the new
-                // sequence. Without this the index could end up out-of-bounds
-                // (e.g. switching from `.threePass` to `.adaptive` shrinks
-                // the sequence by 3×) or land on the wrong character.
+                guard !practiceEntries.isEmpty else { return }
+                // Find the entry we were on under the OLD mode/chunking and
+                // jump to that entry's pass-0 position in the new sequence.
+                // Without this the index could land out-of-bounds (e.g.
+                // switching `.threePass` → `.adaptive` shrinks the sequence
+                // by 3×) or on the wrong entry.
                 let oldSequence = buildSequence(passCount: oldValue.passCount,
                                                 chunkSize: chunkSize,
-                                                count: characters.count)
-                let priorChar = oldSequence.indices.contains(index)
-                    ? oldSequence[index].charIndex
+                                                count: practiceEntries.count)
+                let priorEntry = oldSequence.indices.contains(index)
+                    ? oldSequence[index].entryIndex
                     : 0
-                if let newIdx = sequence.firstIndex(where: { $0.charIndex == priorChar && $0.pass == 0 }) {
-                    if index != newIdx { index = newIdx }
-                    else if let c = current {
-                        canvas?.hintMode = defaultHintMode(for: c)
+                if let newIdx = sequence.firstIndex(where: { $0.entryIndex == priorEntry && $0.pass == 0 }) {
+                    if index != newIdx {
+                        index = newIdx
+                    } else {
+                        rebuildCanvasesForCurrentEntry()
                     }
                 } else {
                     index = 0
                 }
             }
             .sheet(isPresented: gradingBinding) {
-                if let model = canvas, let c = current {
-                    GradingSheet(model: model,
-                                 character: c,
+                if let entry = currentEntry, !canvases.isEmpty {
+                    GradingSheet(canvases: canvases,
+                                 entry: entry,
                                  onGrade: { grade in
-                                     applyGrade(grade, character: c, model: model)
+                                     applyGrade(grade, for: entry)
                                  })
                     .presentationDetents([.fraction(0.55), .large])
                     .presentationDragIndicator(.visible)
@@ -280,7 +287,7 @@ struct WritingSessionView: View {
                 .foregroundStyle(Theme.accent.opacity(0.85))
             Text("Nothing to practice")
                 .font(.system(size: 20, weight: .bold))
-            Text("There are no characters in this session. Close and add items from the Dictionary or list detail first.")
+            Text("There are no entries in this session. Close and add items from the Dictionary or list detail first.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -321,7 +328,7 @@ struct WritingSessionView: View {
         VStack(spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(min(currentCharIndex + 1, characters.count)) / \(characters.count)")
+                    Text("\(min(currentEntryIndex + 1, practiceEntries.count)) / \(practiceEntries.count)")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                     if practiceMode == .threePass {
@@ -361,31 +368,47 @@ struct WritingSessionView: View {
         return "Avg \(Int(avg * 100))%"
     }
 
-    private func cardHeader(for c: HanziCharacter) -> some View {
-        Button {
-            peekCharacter = c
+    /// Header shown above the writing canvases — pinyin, meaning, and the
+    /// "Stroke N of M" indicator for the currently-active char (with its
+    /// hint-mode pill). Tapping the row peeks at the character/word detail.
+    private func cardHeader(for entry: PracticeEntry) -> some View {
+        let activeChar = entry.characters.indices.contains(activeCharIndex)
+            ? entry.characters[activeCharIndex] : nil
+        let pinyin = entryPinyin(entry)
+        let meaning = entryMeaning(entry)
+        return Button {
+            // For multi-char entries we peek the currently-active char so
+            // the user can quickly check stroke order for that specific
+            // hanzi. (A word-level detail view could come later.)
+            peekCharacter = activeChar
         } label: {
             VStack(spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(c.pinyin)
+                    Text(pinyin)
                         .font(.system(size: 22, weight: .semibold, design: .serif))
                         .foregroundStyle(Theme.accent)
                     Image(systemName: "info.circle")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.accent.opacity(0.6))
                 }
-                Text(c.meaning)
+                Text(meaning)
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                if let canvas {
+                if let active = canvases.indices.contains(activeCharIndex)
+                    ? canvases[activeCharIndex] : nil {
                     HStack(spacing: 8) {
-                        if canvas.totalStrokes > 0 {
-                            Text("Stroke \(min(canvas.completedStrokes + 1, canvas.totalStrokes)) of \(canvas.totalStrokes)")
+                        if entry.isWord {
+                            Text("Char \(activeCharIndex + 1) of \(entry.characters.count)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                        }
+                        if active.totalStrokes > 0 {
+                            Text("Stroke \(min(active.completedStrokes + 1, active.totalStrokes)) of \(active.totalStrokes)")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }
-                        hintModePill(canvas.hintMode)
+                        hintModePill(active.hintMode)
                     }
                     .padding(.top, 4)
                 }
@@ -395,6 +418,24 @@ struct WritingSessionView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Pinyin for the whole entry. Multi-char looks up CC-CEDICT; single-char
+    /// uses the MMA per-character pinyin (which already has tone marks).
+    private func entryPinyin(_ entry: PracticeEntry) -> String {
+        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+            return w.pinyin
+        }
+        return entry.characters.first?.pinyin ?? ""
+    }
+
+    /// English meaning for the entry — CC-CEDICT gloss for words, MMA
+    /// definition for single chars.
+    private func entryMeaning(_ entry: PracticeEntry) -> String {
+        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+            return w.gloss
+        }
+        return entry.characters.first?.meaning ?? ""
     }
 
     private func hintModePill(_ mode: WritingHintMode) -> some View {
@@ -446,17 +487,19 @@ struct WritingSessionView: View {
             get: { hintModeOverride },
             set: { newValue in
                 hintModeOverride = newValue
-                if let c = current {
-                    canvas?.hintMode = newValue ?? defaultHintMode(for: c)
+                if let entry = currentEntry {
+                    let mode = newValue ?? defaultHintMode(forKey: entry.word)
+                    for i in canvases.indices { canvases[i].hintMode = mode }
                 }
             }
         )
     }
 
-    /// Picks the hint level for the current character. Three-pass mode is
+    /// Picks the hint level for the current entry. Three-pass mode is
     /// authoritative — each pass has a fixed level. Adaptive mode falls back
-    /// to SRS mastery, with a manual override still taking precedence.
-    private func defaultHintMode(for c: HanziCharacter) -> WritingHintMode {
+    /// to the *entry's* SRS mastery (so a known word stays easy even if its
+    /// constituent characters were studied separately).
+    private func defaultHintMode(forKey key: String) -> WritingHintMode {
         if let pinned = hintModeOverride { return pinned }
         if practiceMode == .threePass {
             switch currentPass {
@@ -465,21 +508,104 @@ struct WritingSessionView: View {
             default: return .memory
             }
         }
-        let card = UserDataController(context: modelContext).card(for: c.id)
+        let card = UserDataController(context: modelContext).card(for: key)
         let mastery = card?.mastery ?? 0
         return mastery >= 0.6 ? .memory : .trace
     }
 
-    private func controls(for c: HanziCharacter) -> some View {
+    /// Side-by-side row of canvases for the current entry. The active canvas
+    /// is full-opacity and accepts input; completed / pending canvases are
+    /// dimmed. When the user finishes the active canvas's last stroke we
+    /// advance `activeCharIndex` automatically.
+    @ViewBuilder
+    private func canvasRow(for entry: PracticeEntry) -> some View {
+        if canvases.isEmpty {
+            Color.clear.aspectRatio(1, contentMode: .fit)
+        } else if canvases.count == 1 {
+            // Fast path for the (very common) single-character entry — no
+            // HStack overhead, full canvas size.
+            singleCanvas(canvases[0], index: 0)
+        } else {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                    singleCanvas(model, index: idx)
+                }
+            }
+            .padding(.horizontal, 8)
+        }
+    }
+
+    /// One canvas in the row, with the tap-to-activate behaviour and the
+    /// stroke-completion callback that drives the per-entry advance state
+    /// machine.
+    @ViewBuilder
+    private func singleCanvas(_ model: WritingCanvasModel, index idx: Int) -> some View {
+        let isActive = idx == activeCharIndex
+        WritingCanvas(model: model) { _ in
+            // Stroke accepted. If this canvas has now completed all its
+            // strokes, advance within (or past) the entry. Delay slightly
+            // so the user sees the accepted-stroke flash.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                handleStrokeAccepted(forCanvasAt: idx)
+            }
+        }
+        .opacity(isActive ? 1 : 0.55)
+        .allowsHitTesting(isActive)
+        .overlay(alignment: .topLeading) {
+            if canvases.count > 1 {
+                Text("\(idx + 1)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(isActive ? Theme.accent : Color.secondary))
+                    .padding(6)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // Tap an inactive canvas to re-focus it (e.g. user wants to
+            // redo or skip ahead). Only allowed for chars that have ALREADY
+            // been finished or are still pending — current behaviour
+            // matches user expectations of standard segmented writing.
+            if idx != activeCharIndex {
+                activeCharIndex = idx
+            }
+        }
+    }
+
+    /// Called by the WritingCanvas after each accepted stroke. Decides
+    /// whether to stay (more strokes to go for this char), advance the
+    /// active char index (this char done, move to the next char in word),
+    /// or transition to grading / advance the sequence (word done).
+    private func handleStrokeAccepted(forCanvasAt idx: Int) {
+        guard idx == activeCharIndex,
+              canvases.indices.contains(idx) else { return }
+        let model = canvases[idx]
+        let charDone = model.totalStrokes > 0
+            && model.completedStrokes >= model.totalStrokes
+        guard charDone else { return }    // more strokes to go on this char
+        if activeCharIndex + 1 < canvases.count {
+            activeCharIndex += 1
+        } else if isGradingStep {
+            phase = .grading
+        } else {
+            advance()
+        }
+    }
+
+    private func controls(for entry: PracticeEntry) -> some View {
         HStack(spacing: 10) {
             Button {
-                canvas?.playDemonstration()
+                if canvases.indices.contains(activeCharIndex) {
+                    canvases[activeCharIndex].playDemonstration()
+                }
             } label: {
                 controlLabel(systemImage: "eye", title: "Show stroke")
             }
             Button {
-                canvas = WritingCanvasModel(character: c,
-                                            hintMode: defaultHintMode(for: c))
+                resetActiveCanvas(for: entry)
             } label: {
                 controlLabel(systemImage: "arrow.counterclockwise", title: "Reset")
             }
@@ -491,29 +617,45 @@ struct WritingSessionView: View {
                 }
             } label: {
                 // "Grade" (not "Finish") — the toolbar has its own "Finish"
-                // for ending the whole session, and reusing the word here
-                // made the two indistinguishable.
+                // for ending the whole session.
                 controlLabel(systemImage: isGradingStep ? "checkmark.seal" : "arrow.right",
                              title: isGradingStep ? "Grade" : "Next pass")
             }
-            .disabled(canvas?.completedStrokes == 0)
+            .disabled(noStrokeYet)
         }
     }
 
+    /// True when none of the entry's canvases have any strokes drawn yet —
+    /// the "Grade" / "Next pass" button stays disabled until the user has
+    /// at least started writing.
+    private var noStrokeYet: Bool {
+        canvases.allSatisfy { $0.completedStrokes == 0 }
+    }
+
+    private func resetActiveCanvas(for entry: PracticeEntry) {
+        guard let key = currentEntry?.word,
+              canvases.indices.contains(activeCharIndex),
+              entry.characters.indices.contains(activeCharIndex) else { return }
+        canvases[activeCharIndex] = WritingCanvasModel(
+            character: entry.characters[activeCharIndex],
+            hintMode: defaultHintMode(forKey: key)
+        )
+    }
+
     /// Two small chip buttons for "I already know this" (mark mastered, skip
-    /// all remaining passes) and "Skip for now" (move on without touching SRS
-    /// state so the card stays due).
-    private func quickActionsRow(for c: HanziCharacter) -> some View {
+    /// all remaining passes for this *entry*) and "Skip for now" (move on
+    /// without touching SRS state so the entry stays due).
+    private func quickActionsRow(for entry: PracticeEntry) -> some View {
         HStack(spacing: 8) {
             Button {
-                markKnown(c)
+                markKnown(entry)
             } label: {
                 quickActionChip(systemImage: "checkmark.circle",
                                 title: "I know this",
                                 tint: Theme.accent)
             }
             Button {
-                skipCharacter()
+                skipEntry()
             } label: {
                 quickActionChip(systemImage: "forward.end",
                                 title: "Skip for now",
@@ -537,41 +679,56 @@ struct WritingSessionView: View {
         )
     }
 
-    /// User claims to already know the character — grade it as `.easy`
-    /// without writing, then drop it from the remainder of the session.
-    /// No practice record is created since there's no real attempt.
-    private func markKnown(_ c: HanziCharacter) {
+    /// User claims to already know the entry — grade it as `.easy` without
+    /// writing, then drop it from the remainder of the session. No practice
+    /// record is created since there's no real attempt.
+    private func markKnown(_ entry: PracticeEntry) {
         let controller = UserDataController(context: modelContext)
-        let card = controller.ensureCard(for: c.id)
+        let card = controller.ensureCard(for: entry.word)
         SRSEngine.apply(grade: .easy, to: card)
         try? modelContext.save()
-        sessionResults[c.id] = 1.0
-        dropCurrentCharacter()
+        sessionResults[entry.word] = 1.0
+        dropCurrentEntry()
     }
 
-    /// Move past the current character entirely without touching its SRS
-    /// state — it stays due, so it'll re-appear in a future session.
-    private func skipCharacter() {
-        dropCurrentCharacter()
+    /// Move past the current entry entirely without touching its SRS state —
+    /// it stays due, so it'll re-appear in a future session.
+    private func skipEntry() {
+        dropCurrentEntry()
     }
 
-    /// Mark the current character as "skipped" and jump to the next visible
-    /// step. All remaining passes for this character will be silently
-    /// stepped over by `advanceToNextVisible()`.
-    private func dropCurrentCharacter() {
+    /// Mark the current entry as "skipped" and jump to the next visible
+    /// step. All remaining passes for this entry will be silently stepped
+    /// over by `advanceToNextVisible()`.
+    private func dropCurrentEntry() {
         guard !sequence.isEmpty else { phase = .finished; return }
-        skippedCharacters.insert(currentCharIndex)
+        skippedEntries.insert(currentEntryIndex)
         advanceToNextVisible()
     }
 
-    /// Step `index` forward until it lands on a sequence entry whose
-    /// character hasn't been skipped. Used by every advance path so a
-    /// dropped character can't sneak back in on a later pass.
+    /// Build fresh `WritingCanvasModel`s for the current entry's characters
+    /// using the appropriate hint mode for this pass. Called whenever the
+    /// active entry changes or the user resets / changes mode.
+    private func rebuildCanvasesForCurrentEntry() {
+        guard let entry = currentEntry else {
+            canvases = []
+            return
+        }
+        let mode = defaultHintMode(forKey: entry.word)
+        canvases = entry.characters.map { char in
+            WritingCanvasModel(character: char, hintMode: mode)
+        }
+        activeCharIndex = 0
+    }
+
+    /// Step `index` forward until it lands on a sequence step whose entry
+    /// hasn't been skipped. Used by every advance path so a dropped entry
+    /// can't sneak back in on a later pass.
     private func advanceToNextVisible() {
         guard !sequence.isEmpty else { phase = .finished; return }
         var newIndex = index + 1
         while newIndex < sequence.count {
-            if !skippedCharacters.contains(sequence[newIndex].charIndex) {
+            if !skippedEntries.contains(sequence[newIndex].entryIndex) {
                 break
             }
             newIndex += 1
@@ -601,12 +758,13 @@ struct WritingSessionView: View {
 
     private var finishedView: some View {
         let practised = sessionResults.count
-        let total = characters.count
+        let total = practiceEntries.count
         let remaining = max(0, total - practised)
         let avg: Double = sessionResults.isEmpty ? 0
             : sessionResults.values.reduce(0, +) / Double(sessionResults.count)
         let duration = Int(Date.now.timeIntervalSince(sessionStarted))
         let finishedEarly = practised < total
+        let unit = practiceEntries.contains(where: { $0.isWord }) ? "entries" : "characters"
         return VStack(spacing: 18) {
             Image(systemName: finishedEarly
                   ? "pause.circle.fill" : "checkmark.seal.fill")
@@ -615,7 +773,7 @@ struct WritingSessionView: View {
             Text(finishedEarly ? "Stopped early" : "Session complete!")
                 .font(.system(size: 24, weight: .bold))
             VStack(spacing: 6) {
-                Text("\(practised) of \(total) character\(total == 1 ? "" : "s") practised")
+                Text("\(practised) of \(total) \(unit) practised")
                 if !sessionResults.isEmpty {
                     Text("Average accuracy \(Int(avg * 100))%")
                 }
@@ -648,22 +806,30 @@ struct WritingSessionView: View {
         .padding()
     }
 
-    private func applyGrade(_ grade: SRSGrade, character: HanziCharacter, model: WritingCanvasModel) {
+    /// Grade the current entry as a *single SRS unit* keyed by its word.
+    /// Accuracy / retries are averaged across all canvases so a slip on any
+    /// constituent character still penalises the word.
+    private func applyGrade(_ grade: SRSGrade, for entry: PracticeEntry) {
         let controller = UserDataController(context: modelContext)
-        let card = controller.ensureCard(for: character.id)
+        let card = controller.ensureCard(for: entry.word)
         SRSEngine.apply(grade: grade, to: card)
-        controller.recordPractice(characterID: character.id,
-                                  accuracy: model.averageAccuracy,
-                                  retries: model.totalRetries,
-                                  duration: model.elapsedSeconds,
+
+        let count = max(1, canvases.count)
+        let avgAccuracy = canvases.map(\.averageAccuracy).reduce(0, +) / Double(count)
+        let totalRetries = canvases.map(\.totalRetries).reduce(0, +)
+        let totalDuration = canvases.map(\.elapsedSeconds).reduce(0, +)
+        controller.recordPractice(characterID: entry.word,
+                                  accuracy: avgAccuracy,
+                                  retries: totalRetries,
+                                  duration: totalDuration,
                                   kind: "writing")
 
-        sessionResults[character.id] = model.averageAccuracy
+        sessionResults[entry.word] = avgAccuracy
         advance()
     }
 
-    /// Move forward by one step, honouring `skippedCharacters` so a dropped
-    /// character can't reappear on its next pass.
+    /// Move forward by one step, honouring `skippedEntries` so a dropped
+    /// entry can't reappear on its next pass.
     private func advance() {
         guard totalSteps > 0 else {
             phase = .finished
@@ -713,16 +879,42 @@ enum SessionPracticeMode: String, CaseIterable, Identifiable, Sendable {
 // MARK: - Grading sheet
 
 struct GradingSheet: View {
-    let model: WritingCanvasModel
-    let character: HanziCharacter
+    /// One canvas per character in the entry being graded.
+    let canvases: [WritingCanvasModel]
+    /// The whole entry — used to display the word, pinyin, meaning, and to
+    /// fetch the entry's SRS card for the "Again / Hard / Good / Easy"
+    /// preview-interval labels.
+    let entry: PracticeEntry
     let onGrade: (SRSGrade) -> Void
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(CharacterStore.self) private var store
     @State private var card: SRSCard?
-    /// Optional sheet for the character info page — tap the header to open.
-    /// (Common urge: after writing, peek at the dictionary entry to confirm
-    /// what it means / check stroke order, without leaving the session.)
+    /// Optional sheet for the entry's detail page — tap the header to open.
+    /// For multi-char entries we open the *first* character; a true
+    /// word-detail screen is a future enhancement.
     @State private var showingDetail: Bool = false
+
+    /// Averaged accuracy across every char's canvas. Used by the SRS card
+    /// preview-interval display and as the "this attempt" headline number.
+    private var averageAccuracy: Double {
+        guard !canvases.isEmpty else { return 0 }
+        return canvases.map(\.averageAccuracy).reduce(0, +) / Double(canvases.count)
+    }
+
+    private var pinyin: String {
+        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+            return w.pinyin
+        }
+        return entry.characters.first?.pinyin ?? ""
+    }
+
+    private var meaning: String {
+        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+            return w.gloss
+        }
+        return entry.characters.first?.meaning ?? ""
+    }
 
     var body: some View {
         // The system drag indicator is enabled at the .sheet call site, so
@@ -732,25 +924,28 @@ struct GradingSheet: View {
                 showingDetail = true
             } label: {
                 HStack(spacing: 8) {
-                    Text(character.char)
+                    Text(entry.word)
                         .font(Theme.hanzi(36))
                         .foregroundStyle(Theme.accent)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                     VStack(alignment: .leading) {
                         HStack(spacing: 4) {
-                            Text(character.pinyin)
+                            Text(pinyin)
                                 .font(.system(size: 16, weight: .semibold))
                             Image(systemName: "info.circle")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Theme.accent.opacity(0.6))
                         }
-                        Text(character.meaning)
+                        Text(meaning)
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.leading)
+                            .lineLimit(2)
                     }
                     Spacer()
                     VStack(alignment: .trailing) {
-                        Text("\(Int(model.averageAccuracy * 100))%")
+                        Text("\(Int(averageAccuracy * 100))%")
                             .font(.system(size: 22, weight: .bold))
                             .foregroundStyle(Theme.accent)
                         Text("accuracy")
@@ -777,53 +972,69 @@ struct GradingSheet: View {
             .padding(.bottom, 16)
         }
         .onAppear {
-            card = UserDataController(context: modelContext).ensureCard(for: character.id)
+            card = UserDataController(context: modelContext).ensureCard(for: entry.word)
         }
         .sheet(isPresented: $showingDetail) {
             NavigationStack {
-                CharacterDetailView(character: character)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done") { showingDetail = false }
-                                .font(.system(size: 15, weight: .semibold))
+                if let first = entry.characters.first {
+                    CharacterDetailView(character: first)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("Done") { showingDetail = false }
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
                         }
-                    }
+                }
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
     }
 
+    /// All stroke results across every canvas in the entry. For multi-char
+    /// words we group by character so the user can see at a glance which
+    /// hanzi a slipped stroke belongs to.
     private var strokeBreakdown: some View {
-        let results = model.perStrokeResults
-        return VStack(alignment: .leading, spacing: 8) {
+        let totalStrokes = canvases.reduce(0) { $0 + $1.perStrokeResults.count }
+        return VStack(alignment: .leading, spacing: 12) {
             Text("STROKE ACCURACY")
                 .font(.system(size: 10, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(.secondary)
-            if results.isEmpty {
+            if totalStrokes == 0 {
                 Text("No strokes recorded.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                // LazyVGrid with an adaptive minimum width wraps cleanly to a
-                // second row when there are too many strokes for one line —
-                // a single HStack squeezed each column below the text's
-                // natural width and the labels/percentages started wrapping
-                // mid-cell at ~10+ strokes.
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 56),
-                                             spacing: 6,
-                                             alignment: .top)],
-                          alignment: .leading,
-                          spacing: 10) {
-                    ForEach(Array(results.enumerated()), id: \.offset) { idx, r in
-                        strokeColumn(strokeNumber: idx + 1, result: r)
+                ForEach(Array(canvases.enumerated()), id: \.offset) { idx, canvas in
+                    if entry.isWord {
+                        Text(entry.characters[idx].char)
+                            .font(Theme.hanzi(16))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.top, idx == 0 ? 0 : 4)
+                    }
+                    let results = canvas.perStrokeResults
+                    if results.isEmpty {
+                        Text("Not yet written.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 56),
+                                                     spacing: 6,
+                                                     alignment: .top)],
+                                  alignment: .leading,
+                                  spacing: 10) {
+                            ForEach(Array(results.enumerated()), id: \.offset) { strokeIdx, r in
+                                strokeColumn(strokeNumber: strokeIdx + 1, result: r)
+                            }
+                        }
                     }
                 }
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.surface)

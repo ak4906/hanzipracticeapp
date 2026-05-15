@@ -40,6 +40,7 @@ struct CharacterDetailView: View {
                 } else if character.radical != nil || character.variant != nil {
                     legacyStructureSection
                 }
+                usedInCharactersSection
                 contextualUsage
                 addToListButton
                 if let m = character.mnemonic { mnemonicCard(text: m) }
@@ -283,6 +284,69 @@ struct CharacterDetailView: View {
     /// the "Also in characters you know" prioritisation of the shared lists.
     private var knownIDs: Set<String> {
         Set(knownCards.map(\.characterID))
+    }
+
+    /// Characters that *contain* this character as a component (e.g. for
+    /// 易: 踢 / 赐 / 锡 / 阳…). Mirrors the existing within-component view
+    /// but in the *reverse* direction. Hidden when there's nothing to show
+    /// (e.g. for chars that aren't components of anything).
+    @ViewBuilder
+    private var usedInCharactersSection: some View {
+        let known = knownIDs
+        let chars = store.charactersSharing(component: character.canonicalID,
+                                            excluding: character.canonicalID,
+                                            prioritise: known,
+                                            limit: 24)
+        if !chars.isEmpty {
+            let knownCount = chars.filter { known.contains($0.canonicalID) }.count
+            VStack(alignment: .leading, spacing: 8) {
+                Text(usedInLabel(knownCount: knownCount))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.8)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(chars) { c in
+                            NavigationLink {
+                                CharacterDetailView(character: c)
+                            } label: {
+                                VStack(spacing: 1) {
+                                    Text(c.char)
+                                        .font(Theme.hanzi(22))
+                                        .foregroundStyle(Theme.accent)
+                                    Text(c.pinyin.isEmpty ? c.pinyinToneless : c.pinyin)
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.7)
+                                }
+                                .frame(width: 44, height: 50)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(known.contains(c.canonicalID)
+                                              ? Theme.accentSoft
+                                              : Theme.surface)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.card)
+            )
+        }
+    }
+
+    private func usedInLabel(knownCount: Int) -> String {
+        if knownCount > 0 {
+            return "Used in characters you know · \(character.char)"
+        }
+        return "Characters using \(character.char)"
     }
 
     private func etymologySection(_ ety: Etymology) -> some View {

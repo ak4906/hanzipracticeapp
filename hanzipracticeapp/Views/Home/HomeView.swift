@@ -290,9 +290,7 @@ struct HomeView: View {
                                         .buttonStyle(.plain)
                                     } else {
                                         Button {
-                                            // Flatten word entries to chars for now — Phase B will
-                                            // add word-as-unit grading.
-                                            session = PracticeSession(characterIDs: list.flattenedCharacters,
+                                            session = PracticeSession(entries: list.effectiveEntries,
                                                                       title: list.name)
                                         } label: {
                                             listChip(list)
