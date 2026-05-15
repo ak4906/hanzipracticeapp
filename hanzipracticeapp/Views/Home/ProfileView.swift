@@ -129,12 +129,36 @@ private struct SettingsSections: View {
             Text("Character of the Day, fallback sessions, Random, and New character queues draw only from official HSK lists through this level. Today's Review shows due cards at or below your level (extra-list hanzi appear once you're set through HSK 6). Raise this when you're ready for harder characters.")
         }
 
-        Section("Reviews") {
-            Stepper("Daily new: \(settings.dailyNewLimit)",
-                    value: $settings.dailyNewLimit,
-                    in: 0...50, step: 5)
+        Section {
+            Stepper("Today's Review size: \(settings.effectiveDailyReviewLimit)",
+                    value: dailyReviewLimitBinding,
+                    in: 3...50, step: 1)
+            Stepper("Chunk size: \(settings.effectivePracticeChunkSize)",
+                    value: chunkSizeBinding,
+                    in: 1...10, step: 1)
+        } header: {
+            Text("Session sizing")
+        } footer: {
+            Text("Today's Review size sets how many due cards appear in one session. Chunk size groups characters during the 3-pass drill so you don't see 100 traces before the first memory test — small chunks (2–3) let you actually remember each character.")
+        }
+
+        Section("Other") {
             Toggle("Sounds & pronunciation", isOn: $settings.soundsEnabled)
         }
+    }
+
+    private var dailyReviewLimitBinding: Binding<Int> {
+        Binding(
+            get: { settings.effectiveDailyReviewLimit },
+            set: { settings.dailyReviewLimit = $0 }
+        )
+    }
+
+    private var chunkSizeBinding: Binding<Int> {
+        Binding(
+            get: { settings.effectivePracticeChunkSize },
+            set: { settings.practiceChunkSize = $0 }
+        )
     }
 
     /// Bridges the boolean stored property to a ChineseVariant for the picker

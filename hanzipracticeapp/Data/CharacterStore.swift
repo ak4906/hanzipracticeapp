@@ -394,9 +394,19 @@ final class CharacterStore {
         // Seed characters are keyed by their Simplified canonical id; we
         // ask `character(for:)` to render them in the active variant so the
         // Traditional user sees 學/愛 instead of an empty grid.
-        SeedCharacters.curated
+        //
+        // Rotate the visible set by day-of-year so the Dictionary doesn't
+        // show the same 12 characters forever — gives a small daily reason
+        // to return and explore. Deterministic per-day so a user who opens
+        // the app twice in a day sees the same set both times.
+        let pool = SeedCharacters.curated
             .filter { $0.tags.contains("trending") }
             .compactMap { character(for: $0.char) }
+        guard pool.count > 12 else { return pool }
+        let day = Calendar.current.ordinality(of: .day, in: .year, for: .now) ?? 1
+        var generator = SeededGenerator(seed: UInt64(day))
+        let shuffled = pool.shuffled(using: &generator)
+        return Array(shuffled.prefix(12))
     }
 
     /// Every HSK level (1–6) with all of the characters at that level,
@@ -513,3 +523,23 @@ nonisolated private let toneMap: [Character: Character] = [
     "ǖ": "u", "ǘ": "u", "ǚ": "u", "ǜ": "u", "ü": "u",
     "ñ": "n"
 ]
+
+/// Tiny deterministic PRNG so daily picks (trending, character of the day)
+/// stay stable across multiple opens within the same day. SplitMix64 — small,
+/// no dependencies, well-distributed.
+struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        // Fold 0 → a non-zero value to keep the generator from getting stuck.
+        self.state = seed &+ 0x9E3779B97F4A7C15
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}

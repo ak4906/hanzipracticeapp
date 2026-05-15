@@ -168,9 +168,9 @@ struct DictionaryView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 8)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
-                                GridItem(.flexible(), spacing: 12)],
-                      spacing: 12) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14),
+                                GridItem(.flexible(), spacing: 14)],
+                      spacing: 20) {
                 ForEach(store.trending) { c in
                     Button { path.append(.character(c)) } label: {
                         HanziGridTile(character: c)
@@ -371,7 +371,15 @@ struct BrowseAllView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 10)],
                           spacing: 10) {
                     ForEach(group.characters) { c in
-                        NavigationLink(value: c) {
+                        // BrowseAllView lives on DictionaryView's NavigationStack
+                        // which only registers a destination for the
+                        // `DictionaryNav` enum — `NavigationLink(value:)` with a
+                        // bare `HanziCharacter` resolved to no destination and
+                        // the tap silently did nothing. Push the destination
+                        // view directly instead.
+                        NavigationLink {
+                            CharacterDetailView(character: c)
+                        } label: {
                             VStack(spacing: 4) {
                                 Text(c.char)
                                     .font(Theme.hanzi(40))

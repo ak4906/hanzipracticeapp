@@ -54,7 +54,12 @@ enum SRSEngine {
             card.repetitions = 0
             card.interval = 0
             card.ease = max(1.3, card.ease - 0.2)
-            card.dueDate = now.addingTimeInterval(10 * 60)             // 10 minutes
+            // Short re-show delay so a slipped character comes back inside
+            // the same session — 1 min on first slip, scaling up to a cap.
+            // The previous flat 10 min meant a single Again often pushed the
+            // card past the user's whole short practice window.
+            let delaySeconds = SRSEngine.againDelaySeconds(for: card.lapseCount)
+            card.dueDate = now.addingTimeInterval(delaySeconds)
         case .hard:
             card.repetitions += 1
             card.ease = max(1.3, card.ease - 0.15)
@@ -93,6 +98,15 @@ enum SRSEngine {
         case 2: return 3
         default: return card.interval * card.ease
         }
+    }
+
+    /// Re-show delay (seconds) after an "Again" grade. Doubles per lapse:
+    /// 1 min, 2 min, 4 min, 8 min, 15 min cap. Keeps slipped characters
+    /// inside the same short practice window for the first few tries.
+    static func againDelaySeconds(for lapseCount: Int) -> TimeInterval {
+        let lapses = max(1, lapseCount)
+        let minutes = min(15.0, pow(2.0, Double(lapses - 1)))
+        return minutes * 60
     }
 
     static func format(interval days: Double) -> String {

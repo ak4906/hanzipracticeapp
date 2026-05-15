@@ -16,6 +16,7 @@ struct WritingSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(CharacterStore.self) private var store
+    @Query private var settingsList: [UserSettings]
 
     @State private var index: Int = 0
     @State private var canvas: WritingCanvasModel? = nil
@@ -54,22 +55,57 @@ struct WritingSessionView: View {
         return out
     }
 
-    /// Total steps until the session is "finished" — characters × passes.
-    private var totalSteps: Int {
-        guard !characters.isEmpty else { return 0 }
-        return characters.count * practiceMode.passCount
+    /// User's preferred chunk size, clamped to 1...characters.count so
+    /// `.threePass` interleaves passes across small batches instead of
+    /// running all of pass 1 before any of pass 2.
+    private var chunkSize: Int {
+        let raw = settingsList.first?.effectivePracticeChunkSize ?? 3
+        guard !characters.isEmpty else { return raw }
+        return max(1, min(raw, characters.count))
     }
 
-    /// Which character we're on within the current pass (0..N-1).
+    /// Pre-built (charIndex, pass) order for the whole session — generated
+    /// once per (characters, mode, chunkSize) triple. For adaptive mode
+    /// this is just a flat single-pass walk.
+    private var sequence: [(charIndex: Int, pass: Int)] {
+        buildSequence(passCount: practiceMode.passCount,
+                      chunkSize: chunkSize,
+                      count: characters.count)
+    }
+
+    /// Pure builder so `onChange(of: practiceMode)` can also compute the
+    /// sequence under the *previous* mode and find the character we were on.
+    private func buildSequence(passCount: Int, chunkSize: Int, count: Int)
+        -> [(charIndex: Int, pass: Int)]
+    {
+        guard count > 0 else { return [] }
+        let cs = max(1, min(chunkSize, count))
+        var out: [(Int, Int)] = []
+        out.reserveCapacity(count * passCount)
+        var start = 0
+        while start < count {
+            let end = min(start + cs, count)
+            for pass in 0..<passCount {
+                for i in start..<end { out.append((i, pass)) }
+            }
+            start = end
+        }
+        return out
+    }
+
+    /// Total steps until the session is "finished".
+    private var totalSteps: Int { sequence.count }
+
+    /// Which character we're on within the current chunk/pass.
     private var currentCharIndex: Int {
-        guard !characters.isEmpty else { return 0 }
-        return index % characters.count
+        guard !sequence.isEmpty, sequence.indices.contains(min(index, sequence.count - 1)) else { return 0 }
+        return sequence[min(index, sequence.count - 1)].charIndex
     }
 
     /// Which pass we're on (0..passCount-1). 0 for adaptive mode.
     private var currentPass: Int {
-        guard !characters.isEmpty else { return 0 }
-        return min(index / characters.count, practiceMode.passCount - 1)
+        guard !sequence.isEmpty, sequence.indices.contains(min(index, sequence.count - 1)) else { return 0 }
+        return sequence[min(index, sequence.count - 1)].pass
     }
 
     private var current: HanziCharacter? {
@@ -96,6 +132,7 @@ struct WritingSessionView: View {
                         } else if let c = current {
                             VStack(spacing: 14) {
                                 cardHeader(for: c)
+                                quickActionsRow(for: c)
                                 Group {
                                     if let canvas {
                                         WritingCanvas(model: canvas) { _ in
@@ -127,12 +164,17 @@ struct WritingSessionView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
+                        // Graded cards have already been persisted by
+                        // applyGrade — exiting never loses progress, so no
+                        // confirmation needed. Ungraded cards retain their
+                        // due-date and come back next session naturally.
                         onClose()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                             .font(.system(size: 22))
                     }
+                    .accessibilityLabel("Close session")
                 }
                 ToolbarItem(placement: .principal) {
                     Text(session.title)
@@ -140,7 +182,23 @@ struct WritingSessionView: View {
                 }
                 if !characters.isEmpty {
                     ToolbarItem(placement: .topBarTrailing) {
-                        settingsMenu
+                        HStack(spacing: 14) {
+                            // Always visible (not just after a card is graded)
+                            // so the user knows mid-session escape is one tap
+                            // away — the prior "appears only after grading"
+                            // behaviour confused users into thinking they
+                            // were locked in.
+                            if phase != .finished {
+                                Button {
+                                    phase = .finished
+                                } label: {
+                                    Text("Finish")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(Theme.accent)
+                                }
+                            }
+                            settingsMenu
+                        }
                     }
                 }
             }
@@ -159,16 +217,26 @@ struct WritingSessionView: View {
                 }
                 phase = .writing
             }
-            .onChange(of: practiceMode) { _, _ in
+            .onChange(of: practiceMode) { oldValue, _ in
                 guard !characters.isEmpty else { return }
-                // Stay on the current character but restart from pass 0 of
-                // the new mode so the user isn't dropped into an unexpected
-                // hint level after switching settings mid-session.
-                let charIdx = currentCharIndex
-                if index != charIdx {
-                    index = charIdx     // triggers onChange(of: index) → rebuilds canvas
-                } else if let c = current {
-                    canvas?.hintMode = defaultHintMode(for: c)
+                // Find the character we were on under the OLD mode/chunking
+                // and jump to that character's pass-0 entry in the new
+                // sequence. Without this the index could end up out-of-bounds
+                // (e.g. switching from `.threePass` to `.adaptive` shrinks
+                // the sequence by 3×) or land on the wrong character.
+                let oldSequence = buildSequence(passCount: oldValue.passCount,
+                                                chunkSize: chunkSize,
+                                                count: characters.count)
+                let priorChar = oldSequence.indices.contains(index)
+                    ? oldSequence[index].charIndex
+                    : 0
+                if let newIdx = sequence.firstIndex(where: { $0.charIndex == priorChar && $0.pass == 0 }) {
+                    if index != newIdx { index = newIdx }
+                    else if let c = current {
+                        canvas?.hintMode = defaultHintMode(for: c)
+                    }
+                } else {
+                    index = 0
                 }
             }
             .sheet(isPresented: gradingBinding) {
@@ -424,6 +492,78 @@ struct WritingSessionView: View {
         }
     }
 
+    /// Two small chip buttons for "I already know this" (mark mastered, skip
+    /// all remaining passes) and "Skip for now" (move on without touching SRS
+    /// state so the card stays due).
+    private func quickActionsRow(for c: HanziCharacter) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                markKnown(c)
+            } label: {
+                quickActionChip(systemImage: "checkmark.circle",
+                                title: "I know this",
+                                tint: Theme.accent)
+            }
+            Button {
+                skipCharacter()
+            } label: {
+                quickActionChip(systemImage: "forward.end",
+                                title: "Skip for now",
+                                tint: .secondary)
+            }
+        }
+    }
+
+    private func quickActionChip(systemImage: String,
+                                  title: String,
+                                  tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+            Text(title).font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule().stroke(tint.opacity(0.4), lineWidth: 1)
+        )
+    }
+
+    /// User claims to already know the character — grade it as `.easy`
+    /// without writing, then jump past any remaining passes for it. No
+    /// practice record is created since there's no real attempt.
+    private func markKnown(_ c: HanziCharacter) {
+        let controller = UserDataController(context: modelContext)
+        let card = controller.ensureCard(for: c.id)
+        SRSEngine.apply(grade: .easy, to: card)
+        try? modelContext.save()
+        sessionResults[c.id] = 1.0
+        skipToNextCharacter()
+    }
+
+    /// Move past the current character entirely without touching its SRS
+    /// state — it stays due, so it'll re-appear in a future session.
+    private func skipCharacter() {
+        skipToNextCharacter()
+    }
+
+    /// Advance `index` to the first step whose charIndex differs from the
+    /// current one (i.e. the next character in the chunk/session). If there
+    /// are no more characters, mark the session finished.
+    private func skipToNextCharacter() {
+        guard !sequence.isEmpty else { phase = .finished; return }
+        let currentChar = currentCharIndex
+        var newIndex = index + 1
+        while newIndex < totalSteps && sequence[newIndex].charIndex == currentChar {
+            newIndex += 1
+        }
+        if newIndex >= totalSteps {
+            phase = .finished
+        } else {
+            index = newIndex
+        }
+    }
+
     private func controlLabel(systemImage: String, title: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: systemImage)
@@ -441,23 +581,35 @@ struct WritingSessionView: View {
     // MARK: - Finishing
 
     private var finishedView: some View {
+        let practised = sessionResults.count
         let total = characters.count
+        let remaining = max(0, total - practised)
         let avg: Double = sessionResults.isEmpty ? 0
             : sessionResults.values.reduce(0, +) / Double(sessionResults.count)
         let duration = Int(Date.now.timeIntervalSince(sessionStarted))
+        let finishedEarly = practised < total
         return VStack(spacing: 18) {
-            Image(systemName: "checkmark.seal.fill")
+            Image(systemName: finishedEarly
+                  ? "pause.circle.fill" : "checkmark.seal.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(Theme.accent)
-            Text("Session complete!")
+            Text(finishedEarly ? "Stopped early" : "Session complete!")
                 .font(.system(size: 24, weight: .bold))
             VStack(spacing: 6) {
-                Text("\(total) character\(total == 1 ? "" : "s")")
-                Text("Average accuracy \(Int(avg * 100))%")
+                Text("\(practised) of \(total) character\(total == 1 ? "" : "s") practised")
+                if !sessionResults.isEmpty {
+                    Text("Average accuracy \(Int(avg * 100))%")
+                }
                 Text("Time: \(duration / 60)m \(duration % 60)s")
+                if finishedEarly && remaining > 0 {
+                    Text("\(remaining) still due — they'll come back next session.")
+                        .foregroundStyle(Theme.accent)
+                        .padding(.top, 4)
+                }
             }
             .font(.system(size: 15))
             .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
             Button {
                 onClose()
             } label: {
@@ -552,23 +704,34 @@ struct GradingSheet: View {
 
     @Environment(\.modelContext) private var modelContext
     @State private var card: SRSCard?
+    /// Optional sheet for the character info page — tap the header to open.
+    /// (Common urge: after writing, peek at the dictionary entry to confirm
+    /// what it means / check stroke order, without leaving the session.)
+    @State private var showingDetail: Bool = false
 
     var body: some View {
+        // The system drag indicator is enabled at the .sheet call site, so
+        // we don't draw our own — that produced two stacked indicators.
         VStack(spacing: 16) {
-            Capsule().fill(Color.secondary.opacity(0.3))
-                .frame(width: 40, height: 4)
-                .padding(.top, 4)
-            VStack(spacing: 4) {
+            Button {
+                showingDetail = true
+            } label: {
                 HStack(spacing: 8) {
                     Text(character.char)
                         .font(Theme.hanzi(36))
                         .foregroundStyle(Theme.accent)
                     VStack(alignment: .leading) {
-                        Text(character.pinyin)
-                            .font(.system(size: 16, weight: .semibold))
+                        HStack(spacing: 4) {
+                            Text(character.pinyin)
+                                .font(.system(size: 16, weight: .semibold))
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.accent.opacity(0.6))
+                        }
                         Text(character.meaning)
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
                     }
                     Spacer()
                     VStack(alignment: .trailing) {
@@ -580,8 +743,11 @@ struct GradingSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .padding(.horizontal, 16)
+            .padding(.top, 18)
 
             strokeBreakdown
                 .padding(.horizontal, 16)
@@ -598,37 +764,64 @@ struct GradingSheet: View {
         .onAppear {
             card = UserDataController(context: modelContext).ensureCard(for: character.id)
         }
+        .sheet(isPresented: $showingDetail) {
+            NavigationStack {
+                CharacterDetailView(character: character)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { showingDetail = false }
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                    }
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private var strokeBreakdown: some View {
         let results = model.perStrokeResults
-        return HStack(spacing: 6) {
-            ForEach(Array(results.enumerated()), id: \.offset) { idx, r in
-                VStack(spacing: 4) {
-                    Text("\(idx + 1)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Circle()
-                        .fill(color(for: r.accuracy))
-                        .frame(width: 14, height: 14)
-                    Text("\(Int(r.accuracy * 100))")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-            }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("STROKE ACCURACY")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
             if results.isEmpty {
                 Text("No strokes recorded.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 4) {
+                    ForEach(Array(results.enumerated()), id: \.offset) { idx, r in
+                        strokeColumn(strokeNumber: idx + 1, result: r)
+                    }
+                }
             }
         }
-        .padding(10)
+        .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.surface)
         )
+    }
+
+    private func strokeColumn(strokeNumber: Int, result: StrokeResult) -> some View {
+        let passed = result.passed
+        return VStack(spacing: 4) {
+            Text("Stroke \(strokeNumber)")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Image(systemName: passed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(passed ? color(for: result.accuracy) : Theme.warning)
+            Text("\(Int(result.accuracy * 100))%")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func color(for accuracy: Double) -> Color {

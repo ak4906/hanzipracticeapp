@@ -344,14 +344,16 @@ struct HomeView: View {
 
     private func startDueSession() {
         let controller = UserDataController(context: modelContext)
+        let limit = settingsList.first?.effectiveDailyReviewLimit ?? 10
+        let fallbackSize = max(3, min(limit, 8))
         let dueFiltered = controller.dueCards()
             .filter { characterMatchesPracticeCeiling($0.characterID) }
-        let ids = Array(dueFiltered.prefix(20)).map(\.characterID)
+        let ids = Array(dueFiltered.prefix(limit)).map(\.characterID)
         let valid = store.characters(for: ids).map(\.id)
         if valid.isEmpty {
-            let gentle = Array(store.officialHSKCanonicalIDs(upThrough: practiceHSKCeiling).shuffled().prefix(8))
+            let gentle = Array(store.officialHSKCanonicalIDs(upThrough: practiceHSKCeiling).shuffled().prefix(fallbackSize))
             let fallbackPool = gentle.isEmpty
-                ? Array(store.allCharacterIDs.shuffled().prefix(8))
+                ? Array(store.allCharacterIDs.shuffled().prefix(fallbackSize))
                 : gentle
             session = PracticeSession(characterIDs: fallbackPool, title: "Today's Review")
         } else {

@@ -189,13 +189,31 @@ final class UserSettings {
     // showed up as a permanent "Loading settings…" on Profile.
     var practiceHSKCeiling: Int
 
+    /// How many due cards to surface in a single "Today's Review" session.
+    /// Optional so existing rows can lightweight-migrate (nil = use default).
+    var dailyReviewLimit: Int?
+
+    /// How many characters to interleave per chunk during multi-pass writing
+    /// drills. Smaller chunks (2–3) keep the "memory" pass close enough to
+    /// the "trace" pass that the learner still remembers the strokes.
+    /// Optional for the same migration reason as above.
+    var practiceChunkSize: Int?
+
     init(dailyNewLimit: Int = 10,
          soundsEnabled: Bool = true,
          preferTraditional: Bool = false,
-         practiceHSKCeiling: Int = 1) {
+         practiceHSKCeiling: Int = 1,
+         dailyReviewLimit: Int? = nil,
+         practiceChunkSize: Int? = nil) {
         self.dailyNewLimit = dailyNewLimit
         self.soundsEnabled = soundsEnabled
         self.preferTraditional = preferTraditional
         self.practiceHSKCeiling = practiceHSKCeiling
+        self.dailyReviewLimit = dailyReviewLimit
+        self.practiceChunkSize = practiceChunkSize
     }
+
+    /// Effective values with sensible fallbacks — use these from views.
+    var effectiveDailyReviewLimit: Int { dailyReviewLimit ?? 10 }
+    var effectivePracticeChunkSize: Int { practiceChunkSize ?? 3 }
 }

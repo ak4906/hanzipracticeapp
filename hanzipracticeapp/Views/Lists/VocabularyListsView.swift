@@ -182,12 +182,15 @@ struct ListDetailView: View {
     @State private var session: PracticeSession? = nil
     @State private var showingAdd: Bool = false
     @State private var showingPasteImport: Bool = false
+    /// Per-session toggle: when on, characters are shuffled before each
+    /// practice run instead of going in list order.
+    @State private var shuffleOnPractice: Bool = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 headerCard
-                practiceButton
+                practiceControls
                 if !list.characterIDs.isEmpty { characterList }
                 else {
                     Text("No characters yet — tap “Add characters”.")
@@ -250,27 +253,45 @@ struct ListDetailView: View {
         )
     }
 
-    private var practiceButton: some View {
-        Button {
-            session = PracticeSession(characterIDs: list.characterIDs,
-                                       title: list.name)
-        } label: {
-            HStack {
-                Image(systemName: "applepencil.and.scribble")
-                Text("Practice writing")
-                    .font(.system(size: 16, weight: .bold))
+    private var practiceControls: some View {
+        VStack(spacing: 10) {
+            Toggle(isOn: $shuffleOnPractice) {
+                Label("Shuffle order", systemImage: "shuffle")
+                    .font(.system(size: 14, weight: .semibold))
             }
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            .tint(Theme.accent)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Theme.accent)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Theme.card)
             )
+            .disabled(list.characterIDs.isEmpty)
+            .opacity(list.characterIDs.isEmpty ? 0.5 : 1)
+
+            Button {
+                let ids = shuffleOnPractice
+                    ? list.characterIDs.shuffled()
+                    : list.characterIDs
+                session = PracticeSession(characterIDs: ids, title: list.name)
+            } label: {
+                HStack {
+                    Image(systemName: "applepencil.and.scribble")
+                    Text("Practice writing")
+                        .font(.system(size: 16, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Theme.accent)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(list.characterIDs.isEmpty)
+            .opacity(list.characterIDs.isEmpty ? 0.5 : 1)
         }
-        .buttonStyle(.plain)
-        .disabled(list.characterIDs.isEmpty)
-        .opacity(list.characterIDs.isEmpty ? 0.5 : 1)
     }
 
     private var characterList: some View {
