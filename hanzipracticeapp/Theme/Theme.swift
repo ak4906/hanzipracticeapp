@@ -16,8 +16,13 @@ enum Theme {
 
     static let hanziFont = "PingFang SC"
 
+    /// Hanzi display font. We pin to PingFang SC (Apple's bundled Simplified
+    /// Chinese face) instead of `.system(..., design: .serif)` because the
+    /// serif system font silently substitutes a different sans-serif glyph
+    /// for some characters (e.g. 爱 in trending tiles), which made the grid
+    /// look like it mixed two fonts.
     static func hanzi(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        .custom(hanziFont, size: size).weight(weight)
     }
 
     static let cardCorner: CGFloat = 18

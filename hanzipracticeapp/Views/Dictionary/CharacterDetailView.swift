@@ -654,12 +654,12 @@ struct AddToListSheet: View {
                                     .foregroundStyle(Color(hex: UInt32(list.colorHex)))
                                 VStack(alignment: .leading) {
                                     Text(list.name).font(.system(size: 15, weight: .semibold))
-                                    Text("\(list.characterIDs.count) characters")
+                                    Text(list.entryCountSummary)
                                         .font(.system(size: 12))
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                if list.characterIDs.contains(character.id) {
+                                if list.effectiveEntries.contains(character.id) {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundStyle(Theme.accent)
                                 } else {
@@ -668,7 +668,7 @@ struct AddToListSheet: View {
                                 }
                             }
                         }
-                        .disabled(list.characterIDs.contains(character.id))
+                        .disabled(list.effectiveEntries.contains(character.id))
                     }
                 }
 

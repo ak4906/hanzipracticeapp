@@ -99,14 +99,20 @@ struct UserDataController {
                     symbol: String = "book.closed.fill",
                     colorHex: Int = 0x266358,
                     initial: [String] = []) -> VocabularyList {
-        let canonicalInitial = initial.map { canonical($0) }
+        // `initial` may be a mix of single-char and multi-char entries —
+        // canonicalise each character individually so 學/学 collapse.
+        let canonicalInitial = initial.map { canonicaliseWord($0) }
         let list = VocabularyList(name: name, detail: detail,
                                   symbol: symbol, colorHex: colorHex,
                                   sortRank: nextVocabularyListSortRank(),
-                                  characterIDs: canonicalInitial)
+                                  characterIDs: [],
+                                  entries: canonicalInitial)
         context.insert(list)
-        // Auto-add any character to the SRS deck.
-        for id in canonicalInitial { _ = ensureCard(for: id) }
+        // Auto-add an SRS card for each constituent character so writing
+        // practice can grade them. Word-level cards are added in Phase B.
+        for entry in canonicalInitial {
+            for ch in entry { _ = ensureCard(for: String(ch)) }
+        }
         context.processPendingChanges()
         do {
             try context.save()
@@ -116,32 +122,70 @@ struct UserDataController {
         return list
     }
 
+    /// Canonicalise each character inside a multi-character word. So
+    /// "学習" → "学习" (traditional → simplified), preserving boundaries.
+    private func canonicaliseWord(_ word: String) -> String {
+        if word.count == 1 { return canonical(word) }
+        return String(word.map { c -> Character in
+            let mapped = canonical(String(c))
+            return mapped.first ?? c
+        })
+    }
+
+    /// Add a single entry (character OR multi-character word) to the list.
+    /// Replaces the older single-char `add(_:to:)` — that one's still here
+    /// as a thin shim for callers that haven't migrated yet.
+    func addEntry(_ entry: String, to list: VocabularyList) {
+        let key = canonicaliseWord(entry)
+        var entries = list.effectiveEntries
+        guard !entries.contains(key) else { return }
+        entries.append(key)
+        list.entries = entries
+        // Drop the legacy field once we've migrated this list onto entries
+        // so the two stay in sync.
+        list.characterIDs = []
+        for ch in key { _ = ensureCard(for: String(ch)) }
+        try? context.save()
+    }
+
+    /// Backwards-compat shim: single character add. New call sites should
+    /// use `addEntry`. Kept so existing code (Dictionary → Add to list) works.
     func add(_ characterID: String, to list: VocabularyList) {
-        let key = canonical(characterID)
-        if !list.characterIDs.contains(key) {
-            list.characterIDs.append(key)
-            _ = ensureCard(for: key)
+        addEntry(characterID, to: list)
+    }
+
+    /// Bulk-add words/chars; saves once at the end.
+    func addManyEntries(_ entries: [String], to list: VocabularyList) {
+        var current = list.effectiveEntries
+        var changed = false
+        for raw in entries {
+            let key = canonicaliseWord(raw)
+            if !current.contains(key) {
+                current.append(key)
+                for ch in key { _ = ensureCard(for: String(ch)) }
+                changed = true
+            }
+        }
+        if changed {
+            list.entries = current
+            list.characterIDs = []
             try? context.save()
         }
     }
 
-    /// Bulk-add canonical ids; saves once at the end.
+    /// Backwards-compat shim.
     func addMany(_ characterIDs: [String], to list: VocabularyList) {
-        var changed = false
-        for raw in characterIDs {
-            let key = canonical(raw)
-            if !list.characterIDs.contains(key) {
-                list.characterIDs.append(key)
-                _ = ensureCard(for: key)
-                changed = true
-            }
-        }
-        if changed { try? context.save() }
+        addManyEntries(characterIDs, to: list)
     }
 
-    func remove(_ characterID: String, from list: VocabularyList) {
-        let key = canonical(characterID)
-        list.characterIDs.removeAll { $0 == key || $0 == characterID }
+    func remove(_ entry: String, from list: VocabularyList) {
+        let key = canonicaliseWord(entry)
+        // Migrate legacy lists to `entries` storage on first edit so future
+        // reads don't have to keep falling back through both fields.
+        var current = list.effectiveEntries
+        current.removeAll { $0 == key || $0 == entry }
+        list.entries = current
+        list.characterIDs = []
         try? context.save()
     }
 

@@ -91,15 +91,21 @@ final class VocabularyList {
     var dateCreated: Date
     /// Manual sort order on the Manage lists screen (lower = higher on screen).
     var sortRank: Int
-    /// Character ids stored as an ordered array.
+    /// Legacy single-character ids stored as an ordered array. Kept so old
+    /// lists keep working — every read goes through `effectiveEntries` which
+    /// falls back to this when `entries` is nil. New writes go to `entries`.
     var characterIDs: [String]
+    /// Each entry is a *word* (one or more hanzi) — the simplified form,
+    /// e.g. "容易" or "你好". Optional so existing rows lightweight-migrate.
+    var entries: [String]?
 
     init(name: String,
          detail: String = "",
          symbol: String = "book.closed.fill",
          colorHex: Int = 0x266358,
          sortRank: Int = 0,
-         characterIDs: [String] = []) {
+         characterIDs: [String] = [],
+         entries: [String]? = nil) {
         self.id = UUID()
         self.name = name
         self.detail = detail
@@ -108,6 +114,33 @@ final class VocabularyList {
         self.dateCreated = .now
         self.sortRank = sortRank
         self.characterIDs = characterIDs
+        self.entries = entries
+    }
+
+    /// What the UI should iterate over. New lists store words here; existing
+    /// pre-word-support lists fall back to `characterIDs` so nothing breaks.
+    var effectiveEntries: [String] {
+        if let entries, !entries.isEmpty { return entries }
+        return characterIDs
+    }
+
+    /// Flatten every entry to its constituent hanzi — used by writing
+    /// practice until word-as-unit grading lands (Phase B).
+    var flattenedCharacters: [String] {
+        effectiveEntries.flatMap { entry in
+            entry.map { String($0) }
+        }
+    }
+
+    /// Display string for the entry count — pluralised and aware of whether
+    /// the list holds multi-char words ("entries") or only single hanzi.
+    var entryCountSummary: String {
+        let n = effectiveEntries.count
+        let hasMulti = effectiveEntries.contains { $0.count > 1 }
+        if hasMulti {
+            return "\(n) " + (n == 1 ? "entry" : "entries")
+        }
+        return "\(n) " + (n == 1 ? "character" : "characters")
     }
 }
 

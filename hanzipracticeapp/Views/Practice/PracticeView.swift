@@ -213,7 +213,7 @@ struct PracticeView: View {
             } else {
                 ForEach(lists) { list in
                     Group {
-                        if list.characterIDs.isEmpty {
+                        if list.effectiveEntries.isEmpty {
                             NavigationLink {
                                 ListDetailView(list: list)
                             } label: {
@@ -222,7 +222,7 @@ struct PracticeView: View {
                             .buttonStyle(.plain)
                         } else {
                             Button {
-                                session = PracticeSession(characterIDs: list.characterIDs,
+                                session = PracticeSession(characterIDs: list.flattenedCharacters,
                                                           title: list.name)
                             } label: {
                                 listRow(list)
@@ -247,7 +247,7 @@ struct PracticeView: View {
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text(list.name).font(.system(size: 15, weight: .semibold))
-                Text("\(list.characterIDs.count) characters")
+                Text(list.entryCountSummary)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }

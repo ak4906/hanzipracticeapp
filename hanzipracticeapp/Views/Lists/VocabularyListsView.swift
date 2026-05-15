@@ -122,7 +122,7 @@ struct VocabularyListsView: View {
     }
 
     private func listTile(_ list: VocabularyList) -> some View {
-        let chars = store.characters(for: list.characterIDs)
+        let entries = list.effectiveEntries
         return HStack(alignment: .top, spacing: 14) {
             VStack(spacing: 4) {
                 Image(systemName: list.symbol)
@@ -139,7 +139,7 @@ struct VocabularyListsView: View {
                     Text(list.name)
                         .font(.system(size: 16, weight: .bold))
                     Spacer()
-                    Text("\(list.characterIDs.count)")
+                    Text("\(entries.count)")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -150,13 +150,13 @@ struct VocabularyListsView: View {
                         .lineLimit(2)
                 }
                 HStack(spacing: 6) {
-                    ForEach(chars.prefix(6)) { c in
-                        Text(c.char)
+                    ForEach(entries.prefix(6), id: \.self) { entry in
+                        Text(entry)
                             .font(Theme.hanzi(20))
                             .foregroundStyle(Theme.accent)
                     }
-                    if chars.count > 6 {
-                        Text("+\(chars.count - 6)")
+                    if entries.count > 6 {
+                        Text("+\(entries.count - 6)")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -191,9 +191,9 @@ struct ListDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 headerCard
                 practiceControls
-                if !list.characterIDs.isEmpty { characterList }
+                if !list.effectiveEntries.isEmpty { entryList }
                 else {
-                    Text("No characters yet — tap “Add characters”.")
+                    Text("No entries yet — tap “Add” or paste in text.")
                         .foregroundStyle(.secondary)
                         .padding()
                 }
@@ -238,7 +238,7 @@ struct ListDetailView: View {
                         .fill(Color(hex: UInt32(list.colorHex)))
                 )
             VStack(alignment: .leading, spacing: 4) {
-                Text("\(list.characterIDs.count) characters")
+                Text(list.entryCountSummary)
                     .font(.system(size: 15, weight: .semibold))
                 Text("Created \(list.dateCreated.formatted(date: .abbreviated, time: .omitted))")
                     .font(.system(size: 12))
@@ -266,14 +266,18 @@ struct ListDetailView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Theme.card)
             )
-            .disabled(list.characterIDs.isEmpty)
-            .opacity(list.characterIDs.isEmpty ? 0.5 : 1)
+            .disabled(list.effectiveEntries.isEmpty)
+            .opacity(list.effectiveEntries.isEmpty ? 0.5 : 1)
 
             Button {
-                let ids = shuffleOnPractice
-                    ? list.characterIDs.shuffled()
-                    : list.characterIDs
-                session = PracticeSession(characterIDs: ids, title: list.name)
+                // Phase A: flatten word entries (容易) to individual characters
+                // for the existing writing session. Phase B will introduce
+                // word-as-unit practice via PracticeSession entries.
+                let entries = shuffleOnPractice
+                    ? list.effectiveEntries.shuffled()
+                    : list.effectiveEntries
+                let chars = entries.flatMap { entry in entry.map { String($0) } }
+                session = PracticeSession(characterIDs: chars, title: list.name)
             } label: {
                 HStack {
                     Image(systemName: "applepencil.and.scribble")
@@ -289,38 +293,98 @@ struct ListDetailView: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(list.characterIDs.isEmpty)
-            .opacity(list.characterIDs.isEmpty ? 0.5 : 1)
+            .disabled(list.effectiveEntries.isEmpty)
+            .opacity(list.effectiveEntries.isEmpty ? 0.5 : 1)
         }
     }
 
-    private var characterList: some View {
+    /// One row per word entry. Multi-character entries (容易) get a
+    /// word-shaped row backed by CC-CEDICT; single-character entries fall
+    /// back to the existing per-hanzi row backed by MMA.
+    private var entryList: some View {
         VStack(spacing: 8) {
-            ForEach(store.characters(for: list.characterIDs)) { c in
-                NavigationLink {
-                    CharacterDetailView(character: c)
-                } label: {
-                    HanziListRow(character: c,
-                                 accessory: AnyView(
-                                    Button {
-                                        UserDataController(context: modelContext)
-                                            .remove(c.id, from: list)
-                                    } label: {
-                                        Image(systemName: "minus.circle.fill")
-                                            .foregroundStyle(.red.opacity(0.85))
-                                            .font(.system(size: 18))
-                                    }
-                                    .buttonStyle(.plain)
-                                 ))
+            ForEach(list.effectiveEntries, id: \.self) { entry in
+                if entry.count > 1 {
+                    wordRow(entry)
+                } else if let c = store.character(for: entry) {
+                    NavigationLink {
+                        CharacterDetailView(character: c)
+                    } label: {
+                        HanziListRow(character: c,
+                                     accessory: AnyView(removeButton(for: entry)))
+                            .padding(12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Theme.card)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    // Entry references a hanzi we don't have in the dictionary
+                    // (rare but possible). Still let the user remove it.
+                    HStack {
+                        Text(entry)
+                            .font(Theme.hanzi(28))
+                            .foregroundStyle(Theme.accent)
+                        Spacer()
+                        removeButton(for: entry)
+                    }
                     .padding(12)
                     .background(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .fill(Theme.card)
                     )
                 }
-                .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Display row for a multi-character word (容易). Pulls pinyin + gloss
+    /// from CC-CEDICT; tapping opens a word-detail sheet (Phase B+).
+    private func wordRow(_ word: String) -> some View {
+        let entry = WordDictionary.shared.entry(for: word)
+        return HStack(spacing: 14) {
+            Text(word)
+                .font(Theme.hanzi(28, weight: .regular))
+                .foregroundStyle(Theme.accent)
+                .frame(minWidth: 56, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+                if let entry {
+                    Text(entry.pinyin)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                    Text(entry.firstGloss)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                } else {
+                    Text("Word")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Text("Custom entry — no dictionary match.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            removeButton(for: word)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.card)
+        )
+    }
+
+    private func removeButton(for entry: String) -> some View {
+        Button {
+            UserDataController(context: modelContext).remove(entry, from: list)
+        } label: {
+            Image(systemName: "minus.circle.fill")
+                .foregroundStyle(.red.opacity(0.85))
+                .font(.system(size: 18))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -429,45 +493,37 @@ struct AddCharactersSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                // Showing all 9,500 characters would be wasteful — guide the
-                // user to search instead when the query is empty.
-                let results: [HanziCharacter] = query.isEmpty
-                    ? store.trending
-                    : store.search(query)
                 if query.isEmpty {
-                    Text("Search for a character, pinyin, or English word above.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(results) { c in
-                    HStack {
-                        Text(c.char)
-                            .font(Theme.hanzi(28))
-                            .foregroundStyle(Theme.accent)
-                            .frame(width: 44, height: 44)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10).fill(Theme.surface)
-                            )
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(c.pinyin).font(.system(size: 14, weight: .semibold))
-                            Text(c.meaning).font(.system(size: 12)).foregroundStyle(.secondary)
-                                .lineLimit(1)
+                    Section {
+                        Text("Search for a character, word, pinyin, or English meaning.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    Section("Trending") {
+                        ForEach(store.trending) { c in
+                            characterRow(c)
                         }
-                        Spacer()
-                        if list.characterIDs.contains(c.id) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Theme.accent)
-                        } else {
-                            Button {
-                                UserDataController(context: modelContext)
-                                    .add(c.id, to: list)
-                            } label: {
-                                Image(systemName: "plus.circle")
-                                    .foregroundStyle(Theme.accent)
-                                    .font(.system(size: 20))
+                    }
+                } else {
+                    let words = WordDictionary.shared.search(query, limit: 20)
+                    if !words.isEmpty {
+                        Section("Words") {
+                            ForEach(words) { w in
+                                wordRow(w)
                             }
-                            .buttonStyle(.plain)
                         }
+                    }
+                    let chars = store.search(query)
+                    if !chars.isEmpty {
+                        Section("Characters") {
+                            ForEach(chars) { c in
+                                characterRow(c)
+                            }
+                        }
+                    }
+                    if words.isEmpty && chars.isEmpty {
+                        Text("No matches.")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -492,6 +548,70 @@ struct AddCharactersSheet: View {
             }
         }
     }
+
+    private func characterRow(_ c: HanziCharacter) -> some View {
+        HStack {
+            Text(c.char)
+                .font(Theme.hanzi(28))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 44, height: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: 10).fill(Theme.surface)
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(c.pinyin).font(.system(size: 14, weight: .semibold))
+                Text(c.meaning).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if list.effectiveEntries.contains(c.id) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Theme.accent)
+            } else {
+                Button {
+                    UserDataController(context: modelContext)
+                        .addEntry(c.id, to: list)
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .foregroundStyle(Theme.accent)
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Word-level row (multi-char) drawn from CC-CEDICT.
+    private func wordRow(_ w: WordEntry) -> some View {
+        HStack(spacing: 12) {
+            Text(w.simplified)
+                .font(Theme.hanzi(24))
+                .foregroundStyle(Theme.accent)
+                .frame(minWidth: 44, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(w.pinyin).font(.system(size: 14, weight: .semibold))
+                Text(w.firstGloss)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            if list.effectiveEntries.contains(w.simplified) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Theme.accent)
+            } else {
+                Button {
+                    UserDataController(context: modelContext)
+                        .addEntry(w.simplified, to: list)
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .foregroundStyle(Theme.accent)
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
 }
 
 // MARK: - Paste / bulk text import
@@ -513,27 +633,47 @@ struct BulkListImportSheet: View {
     @State private var newListName: String = ""
     @State private var selectedListID: UUID?
 
-    private var orderedHanzi: [String] {
-        VocabularyTextImport.hanziInOrder(from: pastedText)
+    /// Word-level tokens straight out of CC-CEDICT's max-matching. Multi-char
+    /// words come through as single tokens; unmatched characters fall back to
+    /// single-hanzi tokens so nothing is silently dropped.
+    private var orderedWords: [String] {
+        VocabularyTextImport.wordsInOrder(from: pastedText,
+                                          using: WordDictionary.shared)
     }
 
-    private var uniqueCanonical: [String] {
-        VocabularyTextImport.uniqueCanonicalSequence(orderedHanzi) { store.canonical($0) }
+    /// Dedupe by canonical (simplified) form while preserving first-seen order.
+    private var uniqueCanonicalWords: [String] {
+        VocabularyTextImport.uniqueCanonicalWords(orderedWords) { store.canonical($0) }
     }
 
-    /// Canonical ids that exist in the bundled dictionary / MMA index.
-    private var recognizedIDs: [String] {
-        uniqueCanonical.filter { store.character(for: $0) != nil }
+    /// Tokens we have either a dictionary entry (multi-char) or an MMA
+    /// character record (single-char) for.
+    private var recognizedEntries: [String] {
+        uniqueCanonicalWords.filter { token in
+            if token.count > 1 {
+                return WordDictionary.shared.contains(token)
+            }
+            return store.character(for: token) != nil
+        }
     }
 
     private var skippedUnknown: [String] {
-        uniqueCanonical.filter { store.character(for: $0) == nil }
+        uniqueCanonicalWords.filter { token in
+            if token.count > 1 { return !WordDictionary.shared.contains(token) }
+            return store.character(for: token) == nil
+        }
     }
 
-    /// When importing into a fixed list: how many recognized chars are new rows.
+    /// When importing into a fixed list: how many recognised tokens would be new rows.
     private var newEntriesForLockedList: Int {
-        guard let list = lockedList else { return recognizedIDs.count }
-        return recognizedIDs.filter { !list.characterIDs.contains($0) }.count
+        guard let list = lockedList else { return recognizedEntries.count }
+        let existing = Set(list.effectiveEntries)
+        return recognizedEntries.filter { !existing.contains($0) }.count
+    }
+
+    /// Multi-char word count (for the preview label).
+    private var multiWordCount: Int {
+        recognizedEntries.filter { $0.count > 1 }.count
     }
 
     private var navTitle: String {
@@ -553,7 +693,7 @@ struct BulkListImportSheet: View {
                 } header: {
                     Text("Paste words or sentences")
                 } footer: {
-                    Text("Commas, Chinese commas (，)、spaces, and English text are ignored — each Hanzi becomes one flashcard entry. Duplicates collapse to a single character.")
+                    Text("Each word becomes one entry. Multi-character words like 容易 or 冰激凌 are detected automatically using the CC-CEDICT dictionary; unknown characters fall through as single hanzi. Punctuation, spaces, and English text are ignored.")
                 }
 
                 if lockedList == nil {
@@ -587,16 +727,23 @@ struct BulkListImportSheet: View {
                 }
 
                 Section("Preview") {
-                    LabeledContent("Hanzi found") {
-                        Text("\(orderedHanzi.count)")
+                    LabeledContent("Words found") {
+                        Text("\(orderedWords.count)")
                     }
                     LabeledContent("Unique (after dedupe)") {
-                        Text("\(uniqueCanonical.count)")
+                        Text("\(uniqueCanonicalWords.count)")
                     }
-                    LabeledContent("In dictionary") {
-                        Text("\(recognizedIDs.count)")
-                            .foregroundStyle(recognizedIDs.isEmpty ? .secondary : Theme.accent)
+                    LabeledContent("Recognised entries") {
+                        Text("\(recognizedEntries.count)")
+                            .foregroundStyle(recognizedEntries.isEmpty ? .secondary : Theme.accent)
                             .fontWeight(.semibold)
+                    }
+                    if multiWordCount > 0 {
+                        LabeledContent("Multi-char words") {
+                            Text("\(multiWordCount)")
+                                .foregroundStyle(Theme.accent)
+                                .fontWeight(.semibold)
+                        }
                     }
                     if !skippedUnknown.isEmpty {
                         LabeledContent("Not in app") {
@@ -640,19 +787,19 @@ struct BulkListImportSheet: View {
     private var importButtonTitle: String {
         if lockedList != nil {
             return newEntriesForLockedList > 0
-                ? "Add \(newEntriesForLockedList) character\(newEntriesForLockedList == 1 ? "" : "s")"
+                ? "Add \(newEntriesForLockedList) " + (newEntriesForLockedList == 1 ? "entry" : "entries")
                 : "Nothing new to add"
         }
         if createNewList {
-            return recognizedIDs.isEmpty ? "Nothing to import"
-                : "Create list with \(recognizedIDs.count) character\(recognizedIDs.count == 1 ? "" : "s")"
+            return recognizedEntries.isEmpty ? "Nothing to import"
+                : "Create list with \(recognizedEntries.count) " + (recognizedEntries.count == 1 ? "entry" : "entries")
         }
-        return recognizedIDs.isEmpty ? "Nothing to import"
-            : "Add \(recognizedIDs.count) to list"
+        return recognizedEntries.isEmpty ? "Nothing to import"
+            : "Add \(recognizedEntries.count) to list"
     }
 
     private var canImport: Bool {
-        guard !recognizedIDs.isEmpty else { return false }
+        guard !recognizedEntries.isEmpty else { return false }
         if lockedList != nil { return newEntriesForLockedList > 0 }
         if createNewList { return true }
         guard !lists.isEmpty else { return false }
@@ -662,11 +809,11 @@ struct BulkListImportSheet: View {
 
     private func performImport() {
         let controller = UserDataController(context: modelContext)
-        let ids = recognizedIDs
+        let ids = recognizedEntries
         guard !ids.isEmpty else { return }
 
         if let list = lockedList {
-            controller.addMany(ids, to: list)
+            controller.addManyEntries(ids, to: list)
             dismiss()
             return
         }
@@ -679,7 +826,7 @@ struct BulkListImportSheet: View {
             _ = controller.createList(name: name, initial: ids)
         } else if let lid = selectedListID ?? lists.first?.id,
                   let target = lists.first(where: { $0.id == lid }) {
-            controller.addMany(ids, to: target)
+            controller.addManyEntries(ids, to: target)
         }
 
         dismiss()

@@ -281,7 +281,7 @@ struct HomeView: View {
                         HStack(spacing: 10) {
                             ForEach(lists.prefix(6)) { list in
                                 Group {
-                                    if list.characterIDs.isEmpty {
+                                    if list.effectiveEntries.isEmpty {
                                         NavigationLink {
                                             ListDetailView(list: list)
                                         } label: {
@@ -290,7 +290,9 @@ struct HomeView: View {
                                         .buttonStyle(.plain)
                                     } else {
                                         Button {
-                                            session = PracticeSession(characterIDs: list.characterIDs,
+                                            // Flatten word entries to chars for now — Phase B will
+                                            // add word-as-unit grading.
+                                            session = PracticeSession(characterIDs: list.flattenedCharacters,
                                                                       title: list.name)
                                         } label: {
                                             listChip(list)
@@ -318,7 +320,7 @@ struct HomeView: View {
             Text(list.name)
                 .font(.system(size: 14, weight: .bold))
                 .lineLimit(1)
-            Text("\(list.characterIDs.count) characters")
+            Text(list.entryCountSummary)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }

@@ -60,7 +60,9 @@ private struct RootBootstrap<Content: View>: View {
             // because @Query's first read sees an empty array and the eventual
             // insert doesn't always re-trigger a body recompute.
             let userSettings = UserDataController(context: modelContext).settings()
-            await store.bootstrap(initialVariant: userSettings.preferTraditional ? .traditional : .simplified)
+            async let charBoot: Void = store.bootstrap(initialVariant: userSettings.preferTraditional ? .traditional : .simplified)
+            async let wordBoot: Void = WordDictionary.shared.loadIfNeeded()
+            _ = await (charBoot, wordBoot)
         }
     }
 }
