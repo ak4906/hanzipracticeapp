@@ -17,8 +17,16 @@ struct StrokeResult: Identifiable, Hashable {
     let positionError: Double // 0…1, normalised to canvas size
     let directionError: Double // 0…1, 0 = perfect, 1 = opposite direction
     let lengthRatio: Double   // user / expected (1 == matching length)
+    /// How many failed attempts preceded this accepted result. 0 means the
+    /// user got the stroke on the first try. Used by the grading sheet to
+    /// show a red ✗ whenever the user had to redo a stroke — accuracy on
+    /// the final accepted attempt alone hides that they slipped earlier.
+    var retries: Int = 0
 
     var passed: Bool { accuracy >= 0.55 }
+    /// True only when the user nailed the stroke on the first try (no
+    /// retries and above the pass threshold).
+    var cleanPass: Bool { passed && retries == 0 }
 
     var grade: String {
         switch accuracy {

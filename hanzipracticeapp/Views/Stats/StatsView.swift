@@ -187,7 +187,7 @@ struct StatsView: View {
             Text("HSK PROGRESS")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary).tracking(1.2)
-            ForEach(1...6, id: \.self) { level in
+            ForEach(1...HSKLevels.maxLevel, id: \.self) { level in
                 hskProgressRow(level: level, cardByID: cardByID)
             }
         }
@@ -217,7 +217,7 @@ struct StatsView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text("HSK \(level)")
+                Text(HSKLevels.displayLabel(for: level))
                     .font(.system(size: 14, weight: .bold))
                 Spacer()
                 Text("\(started) / \(total)")

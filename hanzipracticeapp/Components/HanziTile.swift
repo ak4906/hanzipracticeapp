@@ -69,7 +69,7 @@ struct HanziGridTile: View {
                     .foregroundStyle(Theme.accent)
                 Spacer()
                 if character.hskLevel > 0 {
-                    Text("HSK \(character.hskLevel)")
+                    Text(HSKLevels.displayLabel(for: character.hskLevel))
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
@@ -114,7 +114,7 @@ struct HanziListRow: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                     if character.hskLevel > 0 {
-                        Text("HSK \(character.hskLevel)")
+                        Text(HSKLevels.displayLabel(for: character.hskLevel))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }

@@ -134,11 +134,16 @@ final class WritingCanvasModel {
         lastResult = result
 
         if result.passed {
-            perStrokeResults.append(result)
+            // Snapshot the retry count for THIS stroke before resetting so
+            // the grading sheet can later distinguish "got it first try"
+            // from "needed 2 attempts but final one was accurate".
+            var withRetries = result
+            withRetries.retries = retriesOnCurrent
+            perStrokeResults.append(withRetries)
             completedUserStrokes.append(unitPoints)
             completedStrokes += 1
             retriesOnCurrent = 0
-            feedback = .accepted(result)
+            feedback = .accepted(withRetries)
         } else {
             retriesOnCurrent += 1
             totalRetries += 1

@@ -170,7 +170,7 @@ struct DictionaryView: View {
                 .padding(.bottom, 8)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14),
                                 GridItem(.flexible(), spacing: 14)],
-                      spacing: 20) {
+                      spacing: 30) {
                 ForEach(store.trending) { c in
                     Button { path.append(.character(c)) } label: {
                         HanziGridTile(character: c)
@@ -355,7 +355,7 @@ struct BrowseAllView: View {
     {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("HSK Level \(group.level)")
+                Text(group.level >= 7 ? "HSK 7-9 (advanced band)" : "HSK Level \(group.level)")
                     .font(.system(size: 17, weight: .bold))
                 Spacer()
                 Text("\(group.characters.count) characters")
@@ -410,7 +410,7 @@ struct BrowseAllView: View {
             HStack(spacing: 8) {
                 pill(title: "All", value: nil)
                 ForEach(levels.map(\.level), id: \.self) { level in
-                    pill(title: "HSK \(level)", value: level)
+                    pill(title: HSKLevels.displayLabel(for: level), value: level)
                 }
             }
         }

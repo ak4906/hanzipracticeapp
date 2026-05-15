@@ -35,6 +35,11 @@ struct WritingSessionView: View {
     /// (arrow → trace → memory); `.adaptive` does a single pass with the
     /// hint level chosen by SRS mastery.
     @State private var practiceMode: SessionPracticeMode = .threePass
+    /// Character indices the user has bailed out on (via "I know this" or
+    /// "Skip for now"). Their remaining passes are skipped — without this,
+    /// chunked 3-pass mode would loop the same character back two more times
+    /// because the passes for one character aren't contiguous in `sequence`.
+    @State private var skippedCharacters: Set<Int> = []
 
     enum Phase: Hashable {
         case writing       // user is drawing
@@ -485,8 +490,11 @@ struct WritingSessionView: View {
                     advance()
                 }
             } label: {
+                // "Grade" (not "Finish") — the toolbar has its own "Finish"
+                // for ending the whole session, and reusing the word here
+                // made the two indistinguishable.
                 controlLabel(systemImage: isGradingStep ? "checkmark.seal" : "arrow.right",
-                             title: isGradingStep ? "Finish" : "Next pass")
+                             title: isGradingStep ? "Grade" : "Next pass")
             }
             .disabled(canvas?.completedStrokes == 0)
         }
@@ -530,34 +538,45 @@ struct WritingSessionView: View {
     }
 
     /// User claims to already know the character — grade it as `.easy`
-    /// without writing, then jump past any remaining passes for it. No
-    /// practice record is created since there's no real attempt.
+    /// without writing, then drop it from the remainder of the session.
+    /// No practice record is created since there's no real attempt.
     private func markKnown(_ c: HanziCharacter) {
         let controller = UserDataController(context: modelContext)
         let card = controller.ensureCard(for: c.id)
         SRSEngine.apply(grade: .easy, to: card)
         try? modelContext.save()
         sessionResults[c.id] = 1.0
-        skipToNextCharacter()
+        dropCurrentCharacter()
     }
 
     /// Move past the current character entirely without touching its SRS
     /// state — it stays due, so it'll re-appear in a future session.
     private func skipCharacter() {
-        skipToNextCharacter()
+        dropCurrentCharacter()
     }
 
-    /// Advance `index` to the first step whose charIndex differs from the
-    /// current one (i.e. the next character in the chunk/session). If there
-    /// are no more characters, mark the session finished.
-    private func skipToNextCharacter() {
+    /// Mark the current character as "skipped" and jump to the next visible
+    /// step. All remaining passes for this character will be silently
+    /// stepped over by `advanceToNextVisible()`.
+    private func dropCurrentCharacter() {
         guard !sequence.isEmpty else { phase = .finished; return }
-        let currentChar = currentCharIndex
+        skippedCharacters.insert(currentCharIndex)
+        advanceToNextVisible()
+    }
+
+    /// Step `index` forward until it lands on a sequence entry whose
+    /// character hasn't been skipped. Used by every advance path so a
+    /// dropped character can't sneak back in on a later pass.
+    private func advanceToNextVisible() {
+        guard !sequence.isEmpty else { phase = .finished; return }
         var newIndex = index + 1
-        while newIndex < totalSteps && sequence[newIndex].charIndex == currentChar {
+        while newIndex < sequence.count {
+            if !skippedCharacters.contains(sequence[newIndex].charIndex) {
+                break
+            }
             newIndex += 1
         }
-        if newIndex >= totalSteps {
+        if newIndex >= sequence.count {
             phase = .finished
         } else {
             index = newIndex
@@ -643,18 +662,14 @@ struct WritingSessionView: View {
         advance()
     }
 
-    /// Move forward by one step (next character within this pass, or the
-    /// first character of the next pass when we wrap around).
+    /// Move forward by one step, honouring `skippedCharacters` so a dropped
+    /// character can't reappear on its next pass.
     private func advance() {
         guard totalSteps > 0 else {
             phase = .finished
             return
         }
-        if index + 1 >= totalSteps {
-            phase = .finished
-        } else {
-            index += 1
-        }
+        advanceToNextVisible()
     }
 }
 
@@ -792,7 +807,16 @@ struct GradingSheet: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                HStack(spacing: 4) {
+                // LazyVGrid with an adaptive minimum width wraps cleanly to a
+                // second row when there are too many strokes for one line —
+                // a single HStack squeezed each column below the text's
+                // natural width and the labels/percentages started wrapping
+                // mid-cell at ~10+ strokes.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 56),
+                                             spacing: 6,
+                                             alignment: .top)],
+                          alignment: .leading,
+                          spacing: 10) {
                     ForEach(Array(results.enumerated()), id: \.offset) { idx, r in
                         strokeColumn(strokeNumber: idx + 1, result: r)
                     }
@@ -807,21 +831,33 @@ struct GradingSheet: View {
     }
 
     private func strokeColumn(strokeNumber: Int, result: StrokeResult) -> some View {
-        let passed = result.passed
+        // A stroke counts as a "mistake" (red X) if the user had to redo
+        // it, even if the final accepted attempt was accurate — first-try
+        // correctness is what we want to flag.
+        let clean = result.cleanPass
         return VStack(spacing: 4) {
             Text("Stroke \(strokeNumber)")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-            Image(systemName: passed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(passed ? color(for: result.accuracy) : Theme.warning)
-            Text("\(Int(result.accuracy * 100))%")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
+            Image(systemName: clean ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(clean ? color(for: result.accuracy) : Theme.warning)
+            if result.retries > 0 {
+                Text("\(result.retries)× retry")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.warning)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            } else {
+                Text("\(Int(result.accuracy * 100))%")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
         }
-        .frame(maxWidth: .infinity)
     }
 
     private func color(for accuracy: Double) -> Color {

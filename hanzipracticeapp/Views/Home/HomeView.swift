@@ -234,19 +234,19 @@ struct HomeView: View {
 
     private var practiceHSKCeiling: Int {
         let raw = settingsList.first?.practiceHSKCeiling ?? 1
-        return max(1, min(6, raw))
+        return max(1, min(HSKLevels.maxLevel, raw))
     }
 
     private func characterMatchesPracticeCeiling(_ canonicalID: String) -> Bool {
         guard let c = store.character(for: canonicalID) else { return false }
         if c.hskLevel >= 1 { return c.hskLevel <= practiceHSKCeiling }
-        return practiceHSKCeiling >= 6
+        return practiceHSKCeiling >= HSKLevels.maxLevel
     }
 
     private func characterOfDayMeta(_ c: HanziCharacter) -> String {
         let strokes = "\(c.strokeCount) strokes"
         if c.hskLevel > 0 {
-            return "\(strokes) • HSK \(c.hskLevel)"
+            return "\(strokes) • \(HSKLevels.displayLabel(for: c.hskLevel))"
         }
         return "\(strokes) • Outside HSK lists"
     }

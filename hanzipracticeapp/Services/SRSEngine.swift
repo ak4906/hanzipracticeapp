@@ -34,6 +34,11 @@ enum SRSEngine {
 
     /// Apply a grade to a card, updating it in place.
     static func apply(grade: SRSGrade, to card: SRSCard, now: Date = .now) {
+        // True before we bump reviewCount — this is the very first time the
+        // user is grading this card. Used to override interval logic so the
+        // first review uses friendly short intervals instead of the SM-2
+        // defaults (which gave 1d for every grade except Again).
+        let isFirstReview = card.reviewCount == 0
         card.reviewCount += 1
         card.lastReviewed = now
 
@@ -55,31 +60,45 @@ enum SRSEngine {
             card.interval = 0
             card.ease = max(1.3, card.ease - 0.2)
             // Short re-show delay so a slipped character comes back inside
-            // the same session — 1 min on first slip, scaling up to a cap.
-            // The previous flat 10 min meant a single Again often pushed the
-            // card past the user's whole short practice window.
+            // the same session — 1 min on first slip, doubling up to a cap.
             let delaySeconds = SRSEngine.againDelaySeconds(for: card.lapseCount)
             card.dueDate = now.addingTimeInterval(delaySeconds)
         case .hard:
             card.repetitions += 1
             card.ease = max(1.3, card.ease - 0.15)
-            card.interval = max(1, card.interval * 1.2)
-            if card.repetitions == 1 { card.interval = 1 }
-            card.dueDate = now.addingTimeInterval(card.interval * 86_400)
+            if isFirstReview {
+                // First-time Hard: come back in 10 minutes, not a whole day.
+                card.interval = 0
+                card.dueDate = now.addingTimeInterval(10 * 60)
+            } else {
+                card.interval = max(1, card.interval * 1.2)
+                card.dueDate = now.addingTimeInterval(card.interval * 86_400)
+            }
         case .good:
             card.repetitions += 1
-            card.interval = newInterval(for: card)
+            if isFirstReview {
+                card.interval = 1                    // 1 day
+            } else {
+                card.interval = newInterval(for: card)
+            }
             card.dueDate = now.addingTimeInterval(card.interval * 86_400)
         case .easy:
             card.repetitions += 1
             card.ease = card.ease + 0.15
-            card.interval = newInterval(for: card) * 1.3
+            if isFirstReview {
+                card.interval = 3                    // 3 days
+            } else {
+                card.interval = newInterval(for: card) * 1.3
+            }
             card.dueDate = now.addingTimeInterval(card.interval * 86_400)
         }
     }
 
     /// Non-mutating preview of what `apply(grade:)` would do to a card.
+    /// Returns the resulting interval expressed in days — including sub-day
+    /// values for short re-show delays (Again's 1-min, Hard's 10-min, etc.).
     static func previewInterval(for card: SRSCard, grade: SRSGrade) -> Double {
+        let now = Date.now
         let copy = SRSCard(characterID: card.characterID,
                            interval: card.interval,
                            ease: card.ease,
@@ -88,8 +107,10 @@ enum SRSEngine {
                            mastery: card.mastery,
                            reviewCount: card.reviewCount,
                            lapseCount: card.lapseCount)
-        apply(grade: grade, to: copy)
-        return copy.interval == 0 ? (10.0 / 1440.0) : copy.interval   // minutes → days
+        apply(grade: grade, to: copy, now: now)
+        // Derive from the actual due-date diff so Again's 1-min delay isn't
+        // misreported as the previous hardcoded 10-min fallback.
+        return copy.dueDate.timeIntervalSince(now) / 86_400
     }
 
     private static func newInterval(for card: SRSCard) -> Double {

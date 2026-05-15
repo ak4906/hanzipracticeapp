@@ -50,9 +50,12 @@ struct CharacterDetailView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Character Detail")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: HanziCharacter.self) { other in
-            CharacterDetailView(character: other)
-        }
+        // Note: no `.navigationDestination(for: HanziCharacter.self)` here.
+        // CharacterDetailView is pushed from several places — Dictionary uses
+        // a typed `path: [DictionaryNav]`, which won't accept a bare
+        // HanziCharacter value. The related-character links below use the
+        // destination-view form (`NavigationLink { CharacterDetailView(...) }`)
+        // so they work regardless of how this view was reached.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: shareString) {
@@ -127,7 +130,9 @@ struct CharacterDetailView: View {
                 )
 
                 if let related = chip.related {
-                    NavigationLink(value: related) { label }
+                    NavigationLink {
+                        CharacterDetailView(character: related)
+                    } label: { label }
                         .buttonStyle(.plain)
                 } else {
                     label
@@ -226,7 +231,7 @@ struct CharacterDetailView: View {
                 .multilineTextAlignment(.center)
             HStack(spacing: 6) {
                 if character.hskLevel > 0 {
-                    Text("HSK \(character.hskLevel)")
+                    Text(HSKLevels.displayLabel(for: character.hskLevel))
                     Text("•")
                 }
                 if strokeCount > 0 {
@@ -402,7 +407,9 @@ struct CharacterDetailView: View {
         .contentShape(Rectangle())
 
         if let related {
-            NavigationLink(value: related) { rowContent }
+            NavigationLink {
+                CharacterDetailView(character: related)
+            } label: { rowContent }
                 .buttonStyle(.plain)
         } else {
             rowContent
@@ -445,7 +452,9 @@ struct CharacterDetailView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(chars) { c in
-                        NavigationLink(value: c) {
+                        NavigationLink {
+                            CharacterDetailView(character: c)
+                        } label: {
                             VStack(spacing: 1) {
                                 Text(c.char)
                                     .font(Theme.hanzi(22))

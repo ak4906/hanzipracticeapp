@@ -49,4 +49,15 @@ nonisolated final class HSKLevels: @unchecked Sendable {
     func level(for char: String) -> Int {
         levels[char] ?? 0
     }
+
+    /// Human-readable label for a given HSK level. HSK 3.0 lumps the top
+    /// 1,200 characters into a single "7–9" band; we represent that band as
+    /// numeric level 7 internally for compactness.
+    static func displayLabel(for level: Int) -> String {
+        level >= 7 ? "HSK 7-9" : "HSK \(level)"
+    }
+
+    /// Maximum addressable HSK level — bumped from 6 to 7 when we adopted
+    /// HSK 3.0's combined 7–9 band.
+    static let maxLevel: Int = 7
 }

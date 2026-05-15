@@ -119,14 +119,14 @@ private struct SettingsSections: View {
 
         Section {
             Picker("New picks through", selection: $settings.practiceHSKCeiling) {
-                ForEach(1...6, id: \.self) { n in
+                ForEach(1...HSKLevels.maxLevel, id: \.self) { n in
                     Text(hskCeilingLabel(n)).tag(n)
                 }
             }
         } header: {
             Text("Practice level")
         } footer: {
-            Text("Character of the Day, fallback sessions, Random, and New character queues draw only from official HSK lists through this level. Today's Review shows due cards at or below your level (extra-list hanzi appear once you're set through HSK 6). Raise this when you're ready for harder characters.")
+            Text("Character of the Day, fallback sessions, Random, and New character queues draw only from official HSK lists through this level. Today's Review shows due cards at or below your level (extra-list hanzi appear once you're set through HSK 7-9). Raise this when you're ready for harder characters.")
         }
 
         Section {
@@ -176,6 +176,7 @@ private struct SettingsSections: View {
 
     private func hskCeilingLabel(_ n: Int) -> String {
         if n == 1 { return "HSK 1 only" }
+        if n >= 7 { return "HSK 1 – 7-9 (all)" }
         return "HSK 1–\(n)"
     }
 }

@@ -51,10 +51,18 @@ struct ActivityHeatmap: View {
             }
             HStack(spacing: 4) {
                 ForEach(0..<columns.count, id: \.self) { i in
+                    // Each cell is 16pt wide, but a 3-letter month label
+                    // ("Feb", "Mar", …) doesn't fit and was wrapping into a
+                    // vertical stack of single letters. Let the text overflow
+                    // its frame (months are ~4–5 cells apart, so the spill
+                    // never collides with the next label) and force a single
+                    // line.
                     Text(monthLabels.first(where: { $0.0 == i })?.1 ?? "")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 16)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 16, alignment: .leading)
                 }
             }
         }

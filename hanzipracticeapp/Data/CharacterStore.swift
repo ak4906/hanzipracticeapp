@@ -420,7 +420,7 @@ final class CharacterStore {
         let table = HSKLevels.shared
         var groups: [Int: [HanziCharacter]] = [:]
         var seenIDs: [Int: Set<String>] = [:]
-        for level in 1...6 {
+        for level in 1...HSKLevels.maxLevel {
             let ids = table.byLevel[level] ?? []
             for id in ids {
                 // Some HSK chars only exist in MMA in their traditional
