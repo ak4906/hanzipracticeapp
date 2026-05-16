@@ -144,6 +144,16 @@ final class SRSQuizCard {
     var quizMode: QuizMode {
         QuizMode(rawValue: quizModeRaw) ?? .reading
     }
+
+    /// Bucket for the Stats screen — same definition as `SRSCard.state`
+    /// so reading / translation decks compare apples-to-apples with the
+    /// writing deck.
+    var state: SRSCard.DeckState {
+        if reviewCount == 0 { return .new }
+        if mastery >= 0.9 && interval >= 21 { return .mastered }
+        if repetitions < 2 || interval < 1 { return .learning }
+        return .review
+    }
 }
 
 /// Which side of an entry's metadata the quiz asks the user to recall.

@@ -16,6 +16,7 @@ struct StatsView: View {
     @Environment(CharacterStore.self) private var store
 
     @Query private var cards: [SRSCard]
+    @Query private var quizCards: [SRSQuizCard]
     @Query(sort: \PracticeRecord.date, order: .reverse) private var records: [PracticeRecord]
 
     var body: some View {
@@ -23,7 +24,18 @@ struct StatsView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     summaryCards
-                    deckDistribution
+                    deckDistribution(title: "WRITING DECK",
+                                     states: cards.map { $0.state })
+                    let reading = quizCards.filter { $0.quizMode == .reading }
+                    if !reading.isEmpty {
+                        deckDistribution(title: "READING DECK",
+                                         states: reading.map { $0.state })
+                    }
+                    let translation = quizCards.filter { $0.quizMode == .translation }
+                    if !translation.isEmpty {
+                        deckDistribution(title: "TRANSLATION DECK",
+                                         states: translation.map { $0.state })
+                    }
                     hskProgress
                     practiceActivity
                     strokeAccuracyChart
@@ -109,14 +121,18 @@ struct StatsView: View {
 
     // MARK: - Deck distribution
 
-    private var deckDistribution: some View {
+    /// Generic per-deck distribution card. `states` is any list of
+    /// `DeckState` values (writing cards, reading quiz cards, translation
+    /// quiz cards) — we count per state and render the donut + legend.
+    private func deckDistribution(title: String,
+                                  states: [SRSCard.DeckState]) -> some View {
         let counts = SRSCard.DeckState.allCases.map { state in
-            (state: state, count: cards.filter { $0.state == state }.count)
+            (state: state, count: states.filter { $0 == state }.count)
         }
         let total = counts.map(\.count).reduce(0, +)
 
         return VStack(alignment: .leading, spacing: 12) {
-            Text("DECK DISTRIBUTION")
+            Text(title)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary).tracking(1.2)
             HStack(spacing: 16) {

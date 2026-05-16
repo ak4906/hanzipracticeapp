@@ -182,7 +182,7 @@ struct DictionaryView: View {
                 .padding(.bottom, 8)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14),
                                 GridItem(.flexible(), spacing: 14)],
-                      spacing: 30) {
+                      spacing: 60) {
                 ForEach(store.trending) { c in
                     Button { path.append(.character(c)) } label: {
                         HanziGridTile(character: c)
@@ -330,6 +330,8 @@ struct WordDetailSheet: View {
     @Query private var lists: [VocabularyList]
 
     @State private var newListName: String = ""
+    @State private var practiceSession: PracticeSession? = nil
+    @State private var quizSession: QuizSession? = nil
 
     var body: some View {
         NavigationStack {
@@ -350,6 +352,11 @@ struct WordDetailSheet: View {
                         }
                     }
                     .padding(.vertical, 6)
+                }
+
+                Section("Practice this word") {
+                    practiceThisRow
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 }
 
                 Section("Characters") {
@@ -428,7 +435,62 @@ struct WordDetailSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .fullScreenCover(item: $practiceSession) { s in
+                WritingSessionView(session: s) { practiceSession = nil }
+            }
+            .fullScreenCover(item: $quizSession) { q in
+                QuizView(session: q) { quizSession = nil }
+            }
         }
+    }
+
+    /// Three buttons that start a one-entry practice/quiz session on the
+    /// word. Mirrors the equivalent row on CharacterDetailView so single-
+    /// item drills work the same regardless of where the user is.
+    private var practiceThisRow: some View {
+        HStack(spacing: 8) {
+            practiceButton(title: "Write",
+                           systemImage: "applepencil.and.scribble",
+                           isPrimary: true) {
+                practiceSession = PracticeSession(entries: [word.simplified],
+                                                  title: word.simplified)
+            }
+            practiceButton(title: "Reading",
+                           systemImage: QuizMode.reading.systemImage,
+                           isPrimary: false) {
+                quizSession = QuizSession(entries: [word.simplified],
+                                          title: word.simplified,
+                                          mode: .reading)
+            }
+            practiceButton(title: "Translate",
+                           systemImage: QuizMode.translation.systemImage,
+                           isPrimary: false) {
+                quizSession = QuizSession(entries: [word.simplified],
+                                          title: word.simplified,
+                                          mode: .translation)
+            }
+        }
+    }
+
+    private func practiceButton(title: String,
+                                systemImage: String,
+                                isPrimary: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(isPrimary ? .white : Theme.accent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isPrimary ? Theme.accent : Theme.accentSoft.opacity(0.6))
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 

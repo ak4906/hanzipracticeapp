@@ -17,6 +17,7 @@ struct CharacterDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(CharacterStore.self) private var store
     @Query private var knownCards: [SRSCard]
+    @Query private var userLists: [VocabularyList]
 
     @State private var animateStrokes: Bool = false
     @State private var animationKey: Int = 0
@@ -24,6 +25,11 @@ struct CharacterDetailView: View {
     /// Graphics loaded just so we can compute a component colour map for
     /// the hero panel — `HanziStrokeView` does its own independent load.
     @State private var graphics: MMAGraphics? = nil
+    /// Single-entry practice / quiz sessions launched from the "Practice
+    /// this character" row. Lets a user drill one character without
+    /// having to set up a vocab list first.
+    @State private var practiceSession: PracticeSession? = nil
+    @State private var quizSession: QuizSession? = nil
 
     var body: some View {
         ScrollView {
@@ -35,12 +41,14 @@ struct CharacterDetailView: View {
                 }
                 meaningRow
                 strokeControls
+                practiceThisRow
                 if let etymology = character.etymology {
                     etymologySection(etymology)
                 } else if character.radical != nil || character.variant != nil {
                     legacyStructureSection
                 }
                 usedInCharactersSection
+                commonWordsSection
                 contextualUsage
                 addToListButton
                 if let m = character.mnemonic { mnemonicCard(text: m) }
@@ -67,6 +75,12 @@ struct CharacterDetailView: View {
         .sheet(isPresented: $showAddToList) {
             AddToListSheet(character: character)
                 .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(item: $practiceSession) { s in
+            WritingSessionView(session: s) { practiceSession = nil }
+        }
+        .fullScreenCover(item: $quizSession) { q in
+            QuizView(session: q) { quizSession = nil }
         }
         .task(id: character.char) {
             // Loaded off the main thread by MMAStore.graphics's cache. Used
@@ -248,12 +262,19 @@ struct CharacterDetailView: View {
     private var strokeControls: some View {
         HStack(spacing: 12) {
             Button {
-                animateStrokes = true
-                animationKey += 1
+                // The animation loops automatically, so "Replay" never
+                // really applied — what the user wants once it's running
+                // is to *stop* the loop, not restart it. Toggle here.
+                if animateStrokes {
+                    animateStrokes = false
+                } else {
+                    animateStrokes = true
+                    animationKey += 1
+                }
             } label: {
                 HStack {
-                    Image(systemName: "play.fill")
-                    Text(animateStrokes ? "Replay" : "Stroke Order")
+                    Image(systemName: animateStrokes ? "stop.fill" : "play.fill")
+                    Text(animateStrokes ? "Stop animation" : "Stroke Order")
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Theme.accent)
@@ -276,6 +297,59 @@ struct CharacterDetailView: View {
                     )
             }
         }
+    }
+
+    // MARK: - Practice this character (single-entry sessions)
+
+    /// "Practice this" row — three buttons that kick off a one-entry
+    /// session for the current character in writing / reading /
+    /// translation mode. Lets the user drill a single hanzi without
+    /// having to set up a vocab list. Grades feed into the same SRS
+    /// cards as bigger sessions would, so Stats reflects the work.
+    private var practiceThisRow: some View {
+        HStack(spacing: 8) {
+            practiceThisButton(title: "Write",
+                               systemImage: "applepencil.and.scribble",
+                               isPrimary: true) {
+                practiceSession = PracticeSession(entries: [character.canonicalID],
+                                                  title: character.char)
+            }
+            practiceThisButton(title: "Reading",
+                               systemImage: QuizMode.reading.systemImage,
+                               isPrimary: false) {
+                quizSession = QuizSession(entries: [character.canonicalID],
+                                          title: character.char,
+                                          mode: .reading)
+            }
+            practiceThisButton(title: "Translate",
+                               systemImage: QuizMode.translation.systemImage,
+                               isPrimary: false) {
+                quizSession = QuizSession(entries: [character.canonicalID],
+                                          title: character.char,
+                                          mode: .translation)
+            }
+        }
+    }
+
+    private func practiceThisButton(title: String,
+                                    systemImage: String,
+                                    isPrimary: Bool,
+                                    action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(isPrimary ? .white : Theme.accent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isPrimary ? Theme.accent : Theme.accentSoft.opacity(0.6))
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Etymology
@@ -347,6 +421,110 @@ struct CharacterDetailView: View {
             return "Used in characters you know · \(character.char)"
         }
         return "Characters using \(character.char)"
+    }
+
+    /// Multi-character words containing this character — split into two
+    /// groups: words from the user's own vocab lists (more relevant for
+    /// what they're actually studying) and the wider CC-CEDICT pool.
+    /// Hidden when both groups are empty.
+    @ViewBuilder
+    private var commonWordsSection: some View {
+        // Words from the user's vocab lists that contain this character.
+        // These bubble up first — they're what the user has explicitly
+        // chosen to study, so they're the most contextually useful.
+        let userWords = userVocabWordsContainingCharacter
+        // CC-CEDICT pool, deduped against the user's set so we don't
+        // show 容易 twice when it's already in a list.
+        let cedictWords = WordDictionary.shared.search(character.canonicalID, limit: 200)
+            .filter { $0.simplified.contains(character.canonicalID)
+                      && !userWords.contains($0.simplified) }
+            .sorted { $0.simplified.count < $1.simplified.count }
+            .prefix(12)
+        if !userWords.isEmpty || !cedictWords.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                if !userWords.isEmpty {
+                    Text("From your vocab lists".uppercased())
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.8)
+                    ForEach(userWords, id: \.self) { word in
+                        if let entry = WordDictionary.shared.entry(for: word) {
+                            wordExampleRow(entry)
+                        } else {
+                            customWordRow(word)
+                        }
+                    }
+                }
+                if !cedictWords.isEmpty {
+                    Text("Common words with \(character.char)".uppercased())
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.8)
+                        .padding(.top, userWords.isEmpty ? 0 : 6)
+                    ForEach(Array(cedictWords), id: \.simplified) { word in
+                        wordExampleRow(word)
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.card)
+            )
+        }
+    }
+
+    /// Multi-char words across the user's vocab lists that contain this
+    /// character. Deduped, preserving first-list-first order.
+    private var userVocabWordsContainingCharacter: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for list in userLists {
+            for entry in list.effectiveEntries
+                where entry.count > 1 && entry.contains(character.canonicalID) {
+                if seen.insert(entry).inserted {
+                    out.append(entry)
+                }
+            }
+        }
+        return out
+    }
+
+    /// Row used when a user-list entry isn't in CC-CEDICT — just the
+    /// word, with a "from your list" hint.
+    private func customWordRow(_ word: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(store.displayedWord(word))
+                .font(Theme.hanzi(22))
+                .foregroundStyle(Theme.accent)
+                .frame(minWidth: 56, alignment: .leading)
+            Text("Custom — no dictionary entry")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func wordExampleRow(_ word: WordEntry) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(store.displayedWord(word.simplified))
+                .font(Theme.hanzi(22))
+                .foregroundStyle(Theme.accent)
+                .frame(minWidth: 56, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(word.pinyin)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text(word.firstGloss)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
     }
 
     private func etymologySection(_ ety: Etymology) -> some View {

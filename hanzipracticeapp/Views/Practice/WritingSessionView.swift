@@ -29,7 +29,15 @@ struct WritingSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(CharacterStore.self) private var store
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Query private var settingsList: [UserSettings]
+
+    /// Compact vertical (landscape on phone) — we lay out the session
+    /// horizontally so the canvas can claim the full screen height,
+    /// instead of getting squeezed below the header/controls.
+    private var isCompactVertical: Bool {
+        verticalSizeClass == .compact
+    }
 
     @State private var index: Int = 0
     /// One canvas per character in the *current* entry. Rebuilt every time
@@ -71,6 +79,16 @@ struct WritingSessionView: View {
     /// (Anki-style relearning queue: you keep seeing it within the
     /// session until you get to Hard or better).
     @State private var sequence: [(entryIndex: Int, pass: Int)] = []
+    /// Canvas indices within the *current* entry that the user has marked
+    /// as "I already know this character". Their canvases are dimmed,
+    /// skipped during auto-advance, and treated as 100% accuracy in the
+    /// word-level grade. Persists across all passes of the same entry —
+    /// re-marking on every pass of a 3-pass drill would be annoying.
+    /// Cleared when the entry index changes.
+    @State private var knownCanvases: Set<Int> = []
+    /// Tracks which entry `knownCanvases` belongs to, so we know when to
+    /// clear it (same-entry pass changes don't reset; new entry does).
+    @State private var knownCanvasesEntryIdx: Int = -1
 
     enum Phase: Hashable {
         case writing       // user is drawing
@@ -162,14 +180,32 @@ struct WritingSessionView: View {
                         if phase == .finished {
                             finishedView
                         } else if let entry = currentEntry {
-                            VStack(spacing: 14) {
-                                cardHeader(for: entry)
-                                quickActionsRow(for: entry)
-                                canvasRow(for: entry)
-                                controls(for: entry)
-                                Spacer()
+                            if isCompactVertical {
+                                // Landscape: header + controls in a narrow
+                                // left column, canvas claims the rest of
+                                // the screen so it actually gets bigger
+                                // when the user rotates, not smaller.
+                                HStack(alignment: .top, spacing: 14) {
+                                    VStack(spacing: 12) {
+                                        cardHeader(for: entry)
+                                        quickActionsRow(for: entry)
+                                        Spacer()
+                                        controls(for: entry)
+                                    }
+                                    .frame(width: 240)
+                                    canvasRow(for: entry)
+                                }
+                                .padding(.horizontal, 16)
+                            } else {
+                                VStack(spacing: 14) {
+                                    cardHeader(for: entry)
+                                    quickActionsRow(for: entry)
+                                    canvasRow(for: entry)
+                                    controls(for: entry)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 16)
                             }
-                            .padding(.horizontal, 16)
                         }
                     }
                     .padding(.top, 8)
@@ -652,12 +688,13 @@ struct WritingSessionView: View {
         }
     }
 
-    /// One canvas in the row, with the tap-to-activate behaviour and the
-    /// stroke-completion callback that drives the per-entry advance state
-    /// machine.
+    /// One canvas in the row, with the tap-to-activate behaviour, the
+    /// long-press "I know this character" menu, and the stroke-completion
+    /// callback that drives the per-entry advance state machine.
     @ViewBuilder
     private func singleCanvas(_ model: WritingCanvasModel, index idx: Int) -> some View {
         let isActive = idx == activeCharIndex
+        let isKnown = knownCanvases.contains(idx)
         WritingCanvas(model: model) { _ in
             // Stroke accepted. If this canvas has now completed all its
             // strokes, advance within (or past) the entry. Delay slightly
@@ -667,27 +704,58 @@ struct WritingSessionView: View {
                 handleStrokeAccepted(forCanvasAt: idx)
             }
         }
-        .opacity(isActive ? 1 : 0.55)
-        .allowsHitTesting(isActive)
+        .opacity(isKnown ? 0.35 : (isActive ? 1 : 0.55))
+        .allowsHitTesting(isActive && !isKnown)
         .overlay(alignment: .topLeading) {
             if canvases.count > 1 {
-                Text("\(idx + 1)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(isActive ? Theme.accent : Color.secondary))
-                    .padding(6)
+                HStack(spacing: 4) {
+                    Text("\(idx + 1)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(isActive ? Theme.accent : Color.secondary))
+                    if isKnown {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
+                .padding(6)
             }
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            // Tap an inactive canvas to re-focus it (e.g. user wants to
-            // redo or skip ahead). Only allowed for chars that have ALREADY
-            // been finished or are still pending — current behaviour
-            // matches user expectations of standard segmented writing.
-            if idx != activeCharIndex {
+            // Tap an inactive canvas to re-focus it (unless it's marked
+            // as known — that one just stays out of the way).
+            if idx != activeCharIndex && !isKnown {
                 activeCharIndex = idx
+            }
+        }
+        .contextMenu {
+            // Long-press menu — only meaningful for multi-char entries,
+            // so we hide it for single-char sessions.
+            if canvases.count > 1 {
+                if isKnown {
+                    Button {
+                        knownCanvases.remove(idx)
+                    } label: {
+                        Label("Don't skip this character", systemImage: "arrow.uturn.backward")
+                    }
+                } else if let entry = currentEntry,
+                          entry.characters.indices.contains(idx) {
+                    Button {
+                        markCharacterKnown(at: idx)
+                    } label: {
+                        Label("I know \(entry.characters[idx].char)",
+                              systemImage: "checkmark.circle")
+                    }
+                    Button {
+                        if idx != activeCharIndex { activeCharIndex = idx }
+                    } label: {
+                        Label("Focus on this character", systemImage: "scope")
+                    }
+                }
             }
         }
     }
@@ -703,12 +771,43 @@ struct WritingSessionView: View {
         let charDone = model.totalStrokes > 0
             && model.completedStrokes >= model.totalStrokes
         guard charDone else { return }    // more strokes to go on this char
-        if activeCharIndex + 1 < canvases.count {
-            activeCharIndex += 1
+        advanceWithinEntry()
+    }
+
+    /// Move `activeCharIndex` to the next non-known canvas in the current
+    /// entry; if there isn't one, either trigger grading (final pass) or
+    /// advance the outer sequence to the next entry / pass.
+    private func advanceWithinEntry() {
+        var next = activeCharIndex + 1
+        while next < canvases.count && knownCanvases.contains(next) {
+            next += 1
+        }
+        if next < canvases.count {
+            activeCharIndex = next
         } else if isGradingStep {
             phase = .grading
         } else {
             advance()
+        }
+    }
+
+    /// User long-pressed a canvas and chose "I know this character". Apply
+    /// `.easy` to that character's own SRS card, mark its canvas dim+done,
+    /// and skip past it during auto-advance. The word's overall grade
+    /// happens later as usual; in that grade, this canvas counts as 100%
+    /// accuracy and the WORD's grade isn't propagated to *this* character
+    /// (the easy grade we just applied is more informed).
+    private func markCharacterKnown(at idx: Int) {
+        guard let entry = currentEntry,
+              entry.characters.indices.contains(idx) else { return }
+        let char = entry.characters[idx]
+        let controller = UserDataController(context: modelContext)
+        let card = controller.ensureCard(for: char.id)
+        SRSEngine.apply(grade: .easy, to: card)
+        try? modelContext.save()
+        knownCanvases.insert(idx)
+        if idx == activeCharIndex {
+            advanceWithinEntry()
         }
     }
 
@@ -835,7 +934,19 @@ struct WritingSessionView: View {
         canvases = entry.characters.map { char in
             WritingCanvasModel(character: char, hintMode: mode)
         }
-        activeCharIndex = 0
+        // Persist known-canvas marks across the 3-pass drill — re-marking
+        // "I know 冰" every pass would be annoying. Only reset when the
+        // entry index actually changes.
+        if knownCanvasesEntryIdx != currentEntryIndex {
+            knownCanvases = []
+            knownCanvasesEntryIdx = currentEntryIndex
+        }
+        // Skip to the first canvas that isn't marked known.
+        var first = 0
+        while first < canvases.count && knownCanvases.contains(first) {
+            first += 1
+        }
+        activeCharIndex = min(first, max(0, canvases.count - 1))
     }
 
     /// Step `index` forward until it lands on a sequence step whose entry
@@ -942,16 +1053,34 @@ struct WritingSessionView: View {
         SRSEngine.apply(grade: grade, to: card)
 
         if entry.isWord {
-            for char in entry.characters where char.id != entry.word {
+            // Propagate the word grade only to chars the user *actually
+            // wrote* this session. Characters they marked as already
+            // known got an `.easy` grade applied directly at the
+            // long-press; we don't want to clobber that with a possibly
+            // lower word-level grade just because they slipped on the
+            // other chars.
+            for (idx, char) in entry.characters.enumerated()
+                where char.id != entry.word && !knownCanvases.contains(idx) {
                 let charCard = controller.ensureCard(for: char.id)
                 SRSEngine.apply(grade: grade, to: charCard)
             }
         }
 
-        let count = max(1, canvases.count)
-        let avgAccuracy = canvases.map(\.averageAccuracy).reduce(0, +) / Double(count)
-        let totalRetries = canvases.map(\.totalRetries).reduce(0, +)
-        let totalDuration = canvases.map(\.elapsedSeconds).reduce(0, +)
+        // Per-canvas accuracy. Skipped (known) canvases count as 100% so
+        // they don't drag the word average down.
+        let canvasAccuracies: [Double] = canvases.enumerated().map { idx, canvas in
+            knownCanvases.contains(idx) ? 1.0 : canvas.averageAccuracy
+        }
+        let count = max(1, canvasAccuracies.count)
+        let avgAccuracy = canvasAccuracies.reduce(0, +) / Double(count)
+        let totalRetries = canvases.enumerated()
+            .filter { !knownCanvases.contains($0.offset) }
+            .map { $0.element.totalRetries }
+            .reduce(0, +)
+        let totalDuration = canvases.enumerated()
+            .filter { !knownCanvases.contains($0.offset) }
+            .map { $0.element.elapsedSeconds }
+            .reduce(0, +)
         controller.recordPractice(characterID: entry.word,
                                   accuracy: avgAccuracy,
                                   retries: totalRetries,
