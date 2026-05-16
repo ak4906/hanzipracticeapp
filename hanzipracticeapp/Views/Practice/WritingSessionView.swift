@@ -39,6 +39,84 @@ struct WritingSessionView: View {
         verticalSizeClass == .compact
     }
 
+    /// Hard cap on a single canvas's side length. Defaults to the user's
+    /// Profile setting; the in-session pinch gesture below temporarily
+    /// overrides it (and writes back to the setting on gesture end so the
+    /// new size sticks for next session).
+    private var canvasMaxSideOrInfinity: CGFloat {
+        if liveCanvasSize > 0 { return liveCanvasSize }
+        if let raw = settingsList.first?.practiceCanvasMaxSize, raw > 0 {
+            return CGFloat(raw)
+        }
+        return .infinity
+    }
+
+    /// The cap with the in-flight pinch scale folded in. Used as the
+    /// `maxWidth`/`maxHeight` on the canvas frame so the user sees the
+    /// size change live as they pinch. Clamped to a sensible writable
+    /// minimum so the canvas can't disappear.
+    private var liveCappedSide: CGFloat {
+        let base = canvasMaxSideOrInfinity
+        let baseValue = base.isFinite ? base : 360
+        let scaled = baseValue * pinchScale
+        return max(120, min(scaled, 1000))
+    }
+
+    /// Two-finger pinch on the canvas adjusts the live cap. The base
+    /// value comes from the current `liveCanvasSize` (or Profile setting),
+    /// the gesture's magnification multiplies it, and on gesture-end we
+    /// commit the result back to both `liveCanvasSize` and the user's
+    /// Profile setting so the new size sticks for the next session.
+    /// `simultaneousGesture` modifier at the call site keeps this from
+    /// fighting with the canvas's drawing drag gesture.
+    private var canvasPinchGesture: some Gesture {
+        MagnifyGesture()
+            .updating($pinchScale) { value, state, _ in
+                state = value.magnification
+            }
+            .onEnded { value in
+                let base = canvasMaxSideOrInfinity
+                let baseValue = base.isFinite ? base : 360
+                let newSize = max(120, min(baseValue * value.magnification, 1000))
+                liveCanvasSize = newSize
+                settingsList.first?.practiceCanvasMaxSize = Int(newSize)
+            }
+    }
+
+    /// Visible bottom-right resize handle — a small diagonal-arrow chip
+    /// the user can drag to grow / shrink the canvas. Pinch is also
+    /// supported, but the handle gives users a discoverable affordance
+    /// (otherwise pinch is invisible to anyone who doesn't try it).
+    private var canvasResizeHandle: some View {
+        Image(systemName: "arrow.up.left.and.arrow.down.right")
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(
+                Circle().fill(Theme.accent.opacity(0.85))
+            )
+            .padding(8)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let base = canvasMaxSideOrInfinity
+                        let baseValue = base.isFinite ? base : 360
+                        // Diagonal drag towards bottom-right grows; the
+                        // average of the two axes is what we apply.
+                        let delta = (value.translation.width + value.translation.height) / 2
+                        let newSize = max(120, min(baseValue + delta, 1000))
+                        liveCanvasSize = newSize
+                    }
+                    .onEnded { _ in
+                        // Commit the new size back to the user's settings.
+                        if liveCanvasSize > 0 {
+                            settingsList.first?.practiceCanvasMaxSize = Int(liveCanvasSize)
+                        }
+                    }
+            )
+            .accessibilityLabel("Resize canvas")
+    }
+
     @State private var index: Int = 0
     /// One canvas per character in the *current* entry. Rebuilt every time
     /// `index` (or therefore `currentEntry`) changes.
@@ -89,11 +167,52 @@ struct WritingSessionView: View {
     /// Tracks which entry `knownCanvases` belongs to, so we know when to
     /// clear it (same-entry pass changes don't reset; new entry does).
     @State private var knownCanvasesEntryIdx: Int = -1
+    /// Live canvas size override driven by the in-session pinch gesture.
+    /// 0 means "use the user's saved Profile setting"; any positive value
+    /// caps the canvas side at that many points. Persisted back to
+    /// settings when the gesture ends so the change sticks across sessions.
+    @State private var liveCanvasSize: CGFloat = 0
+    @GestureState private var pinchScale: CGFloat = 1.0
 
     enum Phase: Hashable {
         case writing       // user is drawing
         case grading       // showing summary + SRS buttons
+        case interPassQuiz // multiple-choice prompt between passes
         case finished      // whole session done
+    }
+
+    /// One multiple-choice prompt shown between passes when the user has
+    /// enabled the inter-pass quiz. Hashable so the @State binding works.
+    struct InterPassQuiz: Hashable {
+        enum Kind: String, Hashable {
+            case meaning   // "What does X mean?"
+            case pinyin    // "How is X pronounced?"
+            case component // "Which is a component of X?"
+        }
+        let entryIndex: Int
+        let fromPass: Int          // pass that just completed
+        let toPass: Int            // pass that's about to begin
+        let kind: Kind
+        let prompt: String
+        let correct: String
+        let options: [String]
+    }
+    /// Question queue for the current inter-pass quiz event — multiple
+    /// questions about the same entry (meaning, pinyin, optionally
+    /// components) shown back-to-back. The user must get *all* right to
+    /// advance to the next pass; any wrong answer triggers a pass redo.
+    @State private var currentQuizQueue: [InterPassQuiz] = []
+    @State private var quizQueueIndex: Int = 0
+    @State private var quizSelection: String? = nil
+    @State private var quizAnyWrong: Bool = false   // sticky for the queue
+    /// Entry indices we've already quizzed this session — prevents the
+    /// inter-pass quiz from firing twice on the same word.
+    @State private var quizzedEntryIndices: Set<Int> = []
+
+    /// Currently visible question, if any.
+    private var currentQuiz: InterPassQuiz? {
+        guard currentQuizQueue.indices.contains(quizQueueIndex) else { return nil }
+        return currentQuizQueue[quizQueueIndex]
     }
 
     /// Resolved practice queue. Each entry is one SRS unit — a single hanzi
@@ -179,6 +298,9 @@ struct WritingSessionView: View {
                         progressHeader
                         if phase == .finished {
                             finishedView
+                        } else if phase == .interPassQuiz, let quiz = currentQuiz {
+                            interPassQuizView(quiz)
+                                .padding(.horizontal, 16)
                         } else if let entry = currentEntry {
                             if isCompactVertical {
                                 // Landscape: header + controls in a narrow
@@ -189,6 +311,7 @@ struct WritingSessionView: View {
                                     VStack(spacing: 12) {
                                         cardHeader(for: entry)
                                         quickActionsRow(for: entry)
+                                        memoryAidCard(for: entry)
                                         Spacer()
                                         controls(for: entry)
                                     }
@@ -200,6 +323,7 @@ struct WritingSessionView: View {
                                 VStack(spacing: 14) {
                                     cardHeader(for: entry)
                                     quickActionsRow(for: entry)
+                                    memoryAidCard(for: entry)
                                     canvasRow(for: entry)
                                     controls(for: entry)
                                     Spacer()
@@ -422,7 +546,7 @@ struct WritingSessionView: View {
     private func cardHeader(for entry: PracticeEntry) -> some View {
         Button {
             if entry.characters.count > 1 {
-                peekWord = WordDictionary.shared.entry(for: entry.word)
+                peekWord = wordLookup(entry.word)
                     ?? WordEntry(simplified: entry.word,
                                  traditional: entry.word,
                                  pinyin: entryPinyin(entry),
@@ -478,22 +602,268 @@ struct WritingSessionView: View {
         .contentShape(Rectangle())
     }
 
-    /// Pinyin for the whole entry. Multi-char looks up CC-CEDICT; single-char
-    /// uses the MMA per-character pinyin (which already has tone marks).
+    /// Word lookup that consults user-supplied custom entries first, then
+    /// CC-CEDICT. So if the user defined 加菲猫 with a custom meaning,
+    /// that shows here instead of (or in absence of) any dictionary hit.
+    private func wordLookup(_ word: String) -> WordEntry? {
+        UserDataController(context: modelContext).lookupWord(word)
+    }
+
+    /// Pinyin for the whole entry. Multi-char looks up the unified word
+    /// store (custom → CC-CEDICT); single-char uses the MMA per-character
+    /// pinyin (which already has tone marks).
     private func entryPinyin(_ entry: PracticeEntry) -> String {
-        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+        if entry.isWord, let w = wordLookup(entry.word) {
             return w.pinyin
         }
         return entry.characters.first?.pinyin ?? ""
     }
 
-    /// English meaning for the entry — CC-CEDICT gloss for words, MMA
-    /// definition for single chars.
+    /// English meaning for the entry — unified word lookup for multi-char,
+    /// MMA definition for single chars.
     private func entryMeaning(_ entry: PracticeEntry) -> String {
-        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+        if entry.isWord, let w = wordLookup(entry.word) {
             return w.gloss
         }
         return entry.characters.first?.meaning ?? ""
+    }
+
+    /// Inline component-breakdown card. Shown during the *visual-aid*
+    /// passes (dots + trace) so the user is building meaning-level
+    /// associations while they have a template to look at. Deliberately
+    /// hidden during the memory pass — that pass is the user's chance to
+    /// recall completely unaided, and showing the breakdown then would
+    /// turn it into a spoiler. Also hidden when there's no useful
+    /// decomposition.
+    ///
+    /// Shows three layers when available:
+    ///   1. The MMA etymology *hint* (free-form prose like "Depicts a
+    ///      person resting under a tree") if the character has one.
+    ///   2. Each component with its role badge (Meaning / Sound / Both /
+    ///      Part) plus pinyin + first-gloss meaning.
+    ///   3. A type pill (Pictographic / Phono-semantic / etc.) so the
+    ///      user can pattern-match.
+    @ViewBuilder
+    private func memoryAidCard(for entry: PracticeEntry) -> some View {
+        let activeChar = entry.characters.indices.contains(activeCharIndex)
+            ? entry.characters[activeCharIndex] : nil
+        let activeMode = canvases.indices.contains(activeCharIndex)
+            ? canvases[activeCharIndex].hintMode : nil
+        // Transliteration words (加菲猫 = Garfield, 咖啡 = coffee, 纽约 =
+        // New York) get a simpler "Transliteration of X" card — the
+        // per-character etymology isn't meaningful because the chars
+        // were chosen for sound, not meaning.
+        if memoryAidShouldShow, activeMode != .memory, entry.isWord,
+           let label = transliterationLabel(for: entry) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("TRANSLITERATION")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                Text(label)
+                    .font(.system(size: 14, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Theme.accentSoft.opacity(0.55))
+            )
+        } else if memoryAidShouldShow, activeMode != .memory, let c = activeChar {
+            let etymology = c.etymology
+            let parts = componentBreakdown(for: c)
+            // Only render the card if there's *something* to say.
+            if etymology?.hint != nil
+                || (parts != nil && !(parts!.isEmpty))
+                || c.mnemonic != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Text("BUILD ASSOCIATIONS")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.8)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if let ety = etymology {
+                            Text(ety.type.displayName.uppercased())
+                                .font(.system(size: 9, weight: .bold))
+                                .tracking(0.6)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Theme.accent))
+                        }
+                    }
+                    if let hint = etymology?.hint, !hint.isEmpty {
+                        Text(hint)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let mnemonic = c.mnemonic, !mnemonic.isEmpty {
+                        Text(mnemonic)
+                            .font(.system(size: 12, weight: .medium))
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let parts, !parts.isEmpty {
+                        if memoryAidCompact {
+                            // Full-size mode: collapse the grid into a
+                            // one-line "口 (mouth) · 乞 (beg)" summary so
+                            // the canvas below still fits on screen.
+                            Text(parts.map { compactPart($0) }.joined(separator: "  ·  "))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            HStack(alignment: .top, spacing: 10) {
+                                ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                                    VStack(spacing: 3) {
+                                        Text(part.char)
+                                            .font(Theme.hanzi(22))
+                                            .foregroundStyle(Theme.accent)
+                                        if !part.roleLabel.isEmpty {
+                                            Text(part.roleLabel.uppercased())
+                                                .font(.system(size: 8, weight: .bold))
+                                                .tracking(0.5)
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(Capsule().fill(part.roleColor))
+                                        }
+                                        if !part.pinyin.isEmpty {
+                                            Text(part.pinyin)
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(Theme.accent)
+                                        }
+                                        if !part.meaning.isEmpty {
+                                            Text(part.meaning)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                                .minimumScaleFactor(0.6)
+                                                .multilineTextAlignment(.center)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .top)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Theme.accentSoft.opacity(0.55))
+                )
+            }
+        }
+    }
+
+    /// Compact one-line representation of a component for the Full-size
+    /// memory-aid layout: "口 (mouth)" / "乞 (beg, qǐ)".
+    private func compactPart(_ part: ComponentBreakdownItem) -> String {
+        var bits: [String] = []
+        if !part.meaning.isEmpty { bits.append(part.meaning) }
+        if !part.pinyin.isEmpty  { bits.append(part.pinyin) }
+        let suffix = bits.isEmpty ? "" : " (\(bits.joined(separator: ", ")))"
+        return "\(part.char)\(suffix)"
+    }
+
+    /// Detect "transliteration / loanword" multi-character words —
+    /// 加菲猫 (Garfield), 咖啡 (coffee), 纽约 (New York) etc. Returns
+    /// a short user-facing label when matched, nil otherwise.
+    ///
+    /// Heuristics (all checked against the CC-CEDICT gloss):
+    ///   1. gloss contains "(loanword)" — explicit tag
+    ///   2. first definition starts with a capital letter — proper
+    ///      noun translation
+    ///   3. gloss starts with "abbr." pointing at another phonetic
+    ///      transliteration
+    private func transliterationLabel(for entry: PracticeEntry) -> String? {
+        guard let w = wordLookup(entry.word) else {
+            return nil
+        }
+        let lower = w.gloss.lowercased()
+        // Some characters are pure phono-loaner glyphs (you'll basically
+        // only ever see them in transliterations): 咖, 啡, 啦, 玛, 菲,
+        // 纽, 顿 etc. Skip the heuristic for words made entirely of
+        // common chars — they're more likely real compounds.
+        let phonoLoanChars: Set<Character> = [
+            "咖", "啡", "啦", "玛", "菲", "纽", "顿", "莎", "斯", "尔",
+            "巴", "佛", "罗", "伦", "瑞", "丹", "兰", "贝", "桑", "塔",
+            "拉", "维", "勒", "克", "莱", "蒂", "卡", "诺", "默", "亨",
+            "杰", "麦", "萨", "霍", "弗"
+        ]
+        let containsPhonoChar = entry.word.contains(where: { phonoLoanChars.contains($0) })
+        if lower.contains("(loanword)") || lower.contains("loanword)") {
+            return "Loanword / transliteration of '\(w.firstGloss)'"
+        }
+        let firstDef = (w.gloss.split(whereSeparator: { ";/".contains($0) })
+                              .first?.trimmingCharacters(in: .whitespaces)) ?? w.gloss
+        if let firstChar = firstDef.unicodeScalars.first,
+           firstChar.properties.isUppercase {
+            // Proper noun — likely a place / person / brand transliteration.
+            // Only flag if we've got at least one phono-loan char OR the
+            // word is short (most transliterations are 2-3 chars).
+            if containsPhonoChar || entry.word.count <= 4 {
+                return "Transliteration of '\(firstDef)'"
+            }
+        }
+        return nil
+    }
+
+    /// Resolve the per-component breakdown for `c`. Uses the already-parsed
+    /// etymology when available (preserves the semantic / phonetic role
+    /// info from MMA) so we can show role badges like "Meaning" / "Sound".
+    /// Returns nil if the character has no useful etymology data.
+    private func componentBreakdown(for c: HanziCharacter)
+        -> [ComponentBreakdownItem]?
+    {
+        guard let etymology = c.etymology else { return nil }
+        // Defensive: drop any component that points back at the host
+        // character itself (compare both canonical and displayed forms).
+        // The makeEtymology pipeline already filters, but a stale MMA
+        // entry or variant pair can still slip through.
+        let filtered = etymology.components.filter {
+            $0.char != c.char && $0.char != c.canonicalID
+        }
+        guard !filtered.isEmpty else { return nil }
+        return filtered.map { comp in
+            let resolved = store.character(for: comp.char)
+            return ComponentBreakdownItem(
+                char: store.displayed(comp.char),
+                pinyin: resolved?.pinyin ?? "",
+                meaning: resolved?.meaning.firstPart ?? "",
+                roleLabel: comp.roleLabel,
+                roleColor: ComponentBreakdownItem.color(for: comp.role)
+            )
+        }
+    }
+
+    /// Display tuple for the memory-aid card. Mirrors EtymologyComponent
+    /// fields with the role flattened into a label + colour so the row
+    /// renderer doesn't need to know about the Role enum.
+    private struct ComponentBreakdownItem {
+        let char: String
+        let pinyin: String
+        let meaning: String
+        let roleLabel: String
+        let roleColor: Color
+
+        static func color(for role: EtymologyComponent.Role) -> Color {
+            switch role {
+            case .semantic:  return Theme.accent
+            case .phonetic:  return Color(hex: 0x6789C2)
+            case .both:      return Color(hex: 0xC9A13C)
+            case .component: return Color.secondary
+            }
+        }
     }
 
     private func hintModePill(_ mode: WritingHintMode) -> some View {
@@ -623,33 +993,82 @@ struct WritingSessionView: View {
         if canvases.isEmpty {
             Color.clear.aspectRatio(1, contentMode: .fit)
         } else if canvases.count == 1 {
-            // Fast path for the (very common) single-character entry — no
-            // stack overhead, full canvas size.
+            // Fast path for the (very common) single-character entry.
+            // Resize controls only meaningful in Full-size mode (in Fit
+            // mode the canvas already fills the available space).
             singleCanvas(canvases[0], index: 0)
+                .frame(maxWidth: liveCappedSide,
+                       maxHeight: liveCappedSide)
+                .frame(maxWidth: .infinity)
+                .modifier(ResizableCanvasModifier(enabled: resizeAffordanceEnabled,
+                                                  handle: canvasResizeHandle,
+                                                  gesture: canvasPinchGesture))
         } else {
-            let direction = settingsList.first?.effectiveWritingDirection ?? .horizontal
-            let fit = settingsList.first?.effectivePracticeCanvasFit ?? .fit
-            switch (direction, fit) {
-            case (.horizontal, .fit):
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
-                        singleCanvas(model, index: idx)
-                    }
-                }
-                .padding(.horizontal, 8)
-            case (.horizontal, .full):
-                fullSizeScroll(axis: .horizontal)
-            case (.vertical, .fit):
-                VStack(spacing: 8) {
-                    ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
-                        singleCanvas(model, index: idx)
-                    }
-                }
-                .padding(.horizontal, 8)
-            case (.vertical, .full):
-                fullSizeScroll(axis: .vertical)
-            }
+            // Multi-char layout — same direction/fit switch as before.
+            // Resize handle only in Full-size scroll mode (Fit mode
+            // already fills the screen; resizing it makes no sense).
+            multiCanvasLayout
+                .modifier(ResizableCanvasModifier(enabled: resizeAffordanceEnabled,
+                                                  handle: canvasResizeHandle,
+                                                  gesture: canvasPinchGesture))
         }
+    }
+
+    /// Resize affordance (pinch + bottom-right handle) is only useful in
+    /// Full-size mode — in Fit mode the canvas auto-fills the screen so
+    /// shrinking the cap doesn't change anything visible. Hidden in Fit
+    /// mode keeps the screen clean.
+    private var resizeAffordanceEnabled: Bool {
+        (settingsList.first?.effectivePracticeCanvasFit ?? .fit) == .full
+    }
+
+    /// The actual multi-character canvas group. Switches between HStack/
+    /// VStack and fit/scroll based on the user's settings.
+    @ViewBuilder
+    private var multiCanvasLayout: some View {
+        let direction = settingsList.first?.effectiveWritingDirection ?? .horizontal
+        let fit = settingsList.first?.effectivePracticeCanvasFit ?? .fit
+        switch (direction, fit) {
+        case (.horizontal, .fit):
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                    singleCanvas(model, index: idx)
+                }
+            }
+            .padding(.horizontal, 8)
+        case (.horizontal, .full):
+            fullSizeScroll(axis: .horizontal)
+        case (.vertical, .fit):
+            VStack(spacing: 8) {
+                ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
+                    singleCanvas(model, index: idx)
+                }
+            }
+            .padding(.horizontal, 8)
+        case (.vertical, .full):
+            fullSizeScroll(axis: .vertical)
+        }
+    }
+
+    /// Build-associations card is always rendered; it's the layout
+    /// inside the card that adapts. In Full-size mode we collapse the
+    /// card to just its header + hint (one line) so the canvas below
+    /// stays reachable. In Fit mode it shows the full component grid.
+    private var memoryAidShouldShow: Bool { true }
+
+    /// True when we should render the compact (Full-size-friendly)
+    /// version of the build-associations card.
+    private var memoryAidCompact: Bool {
+        (settingsList.first?.effectivePracticeCanvasFit ?? .fit) == .full
+    }
+
+    /// Hard cap applied to each canvas in the *multi-character* full-size
+    /// layouts so the in-session pinch / drag-handle actually changes the
+    /// canvas size (the single-canvas fast path applies the cap directly).
+    /// In Fit mode this is just `.infinity` so canvases shrink to fit.
+    private var multiCanvasSideCap: CGFloat {
+        let fit = settingsList.first?.effectivePracticeCanvasFit ?? .fit
+        return fit == .full ? liveCappedSide : .infinity
     }
 
     /// Scroll-paged layout used in "Full size" mode. Each canvas is laid
@@ -658,6 +1077,7 @@ struct WritingSessionView: View {
     /// the user doesn't have to chase it.
     @ViewBuilder
     private func fullSizeScroll(axis: Axis) -> some View {
+        let cap = multiCanvasSideCap
         ScrollViewReader { proxy in
             ScrollView(axis == .horizontal ? .horizontal : .vertical,
                        showsIndicators: false) {
@@ -665,6 +1085,7 @@ struct WritingSessionView: View {
                     LazyHStack(spacing: 16) {
                         ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
                             singleCanvas(model, index: idx)
+                                .frame(maxWidth: cap, maxHeight: cap)
                                 .containerRelativeFrame(.horizontal)
                                 .id(idx)
                         }
@@ -674,6 +1095,7 @@ struct WritingSessionView: View {
                     LazyVStack(spacing: 16) {
                         ForEach(Array(canvases.enumerated()), id: \.offset) { idx, model in
                             singleCanvas(model, index: idx)
+                                .frame(maxWidth: cap, maxHeight: cap)
                                 .containerRelativeFrame(.horizontal)
                                 .id(idx)
                         }
@@ -1102,14 +1524,314 @@ struct WritingSessionView: View {
     }
 
     /// Move forward by one step, honouring `skippedEntries` so a dropped
-    /// entry can't reappear on its next pass.
+    /// entry can't reappear on its next pass. If the user has enabled the
+    /// inter-pass quiz AND we're transitioning into pass 1 of an entry we
+    /// haven't quizzed yet, intercept with a multiple-choice question set.
     private func advance() {
         guard totalSteps > 0 else {
             phase = .finished
             return
         }
+        let quiz = generateInterPassQuizIfNeeded()
+        if !quiz.isEmpty {
+            currentQuizQueue = quiz
+            quizQueueIndex = 0
+            quizSelection = nil
+            quizAnyWrong = false
+            phase = .interPassQuiz
+            return
+        }
         advanceToNextVisible()
     }
+
+    /// Decide whether to inject a quiz set between the current pass and
+    /// the next. Fires once per entry, right before that entry's *trace*
+    /// pass (pass 1) starts. Returns the full queue of questions for the
+    /// entry — meaning, pinyin, and (when the etymology is available) a
+    /// component question — all of which the user must answer correctly
+    /// to advance.
+    private func generateInterPassQuizIfNeeded() -> [InterPassQuiz] {
+        let enabled = settingsList.first?.interPassQuizEnabled ?? false
+        guard enabled,
+              practiceMode == .threePass,
+              !sequence.isEmpty,
+              index + 1 < sequence.count else { return [] }
+        let next = sequence[index + 1]
+        guard next.pass == 1,
+              !quizzedEntryIndices.contains(next.entryIndex),
+              practiceEntries.indices.contains(next.entryIndex)
+        else { return [] }
+        let entry = practiceEntries[next.entryIndex]
+        let here = sequence[index]    // for parity in makeQuiz signature
+        // Build the question queue: meaning + pinyin always, plus a
+        // component question for single-char entries with etymology
+        // data. Anything missing source data is just skipped.
+        let correctMeaning = entryMeaning(entry).firstPart
+        let correctPinyin = entryPinyin(entry)
+        var queue: [InterPassQuiz] = []
+        if !correctMeaning.isEmpty {
+            queue.append(makeQuiz(.meaning, entry: entry,
+                                  here: here, next: next,
+                                  correct: correctMeaning))
+        }
+        if !correctPinyin.isEmpty {
+            queue.append(makeQuiz(.pinyin, entry: entry,
+                                  here: here, next: next,
+                                  correct: correctPinyin))
+        }
+        if let componentQuiz = makeComponentQuizIfPossible(entry: entry,
+                                                            here: here,
+                                                            next: next) {
+            queue.append(componentQuiz)
+        }
+        return queue
+    }
+
+    private func makeQuiz(_ kind: InterPassQuiz.Kind,
+                          entry: PracticeEntry,
+                          here: (entryIndex: Int, pass: Int),
+                          next: (entryIndex: Int, pass: Int),
+                          correct: String) -> InterPassQuiz {
+        let prompt: String = {
+            let word = entry.word
+            switch kind {
+            case .meaning:   return "What does \(word) mean?"
+            case .pinyin:    return "How is \(word) pronounced?"
+            case .component: return "Which is a component of \(word)?"
+            }
+        }()
+        let options = quizDistractors(for: kind, correct: correct,
+                                      excludingEntry: entry)
+        return InterPassQuiz(entryIndex: here.entryIndex,
+                             fromPass: here.pass,
+                             toPass: next.pass,
+                             kind: kind,
+                             prompt: prompt,
+                             correct: correct,
+                             options: options)
+    }
+
+    /// Component question — only emitted when the active character has
+    /// useful etymology data. Multi-char words get this for their first
+    /// character (the user is still building radical familiarity even
+    /// when learning whole words).
+    private func makeComponentQuizIfPossible(entry: PracticeEntry,
+                                              here: (entryIndex: Int, pass: Int),
+                                              next: (entryIndex: Int, pass: Int))
+        -> InterPassQuiz?
+    {
+        // For multi-char, pick the first char with an etymology.
+        let candidates = entry.characters
+        guard let host = candidates.first(where: { c in
+            (c.etymology?.components.contains { $0.char != c.char && $0.char != c.canonicalID })
+                ?? false
+        }) else { return nil }
+        let components = host.etymology?.components.filter {
+            $0.char != host.char && $0.char != host.canonicalID
+        } ?? []
+        guard let correct = components.randomElement()?.char else { return nil }
+        let prompt = "Which is a component of \(host.char)?"
+        let options = componentDistractors(correct: correct,
+                                            host: host,
+                                            session: practiceEntries)
+        return InterPassQuiz(entryIndex: here.entryIndex,
+                             fromPass: here.pass,
+                             toPass: next.pass,
+                             kind: .component,
+                             prompt: prompt,
+                             correct: correct,
+                             options: options)
+    }
+
+    /// Distractors for the component question — pull from a small set of
+    /// common radicals that aren't components of the host character.
+    private func componentDistractors(correct: String,
+                                       host: HanziCharacter,
+                                       session: [PracticeEntry]) -> [String] {
+        let hostComponents = Set((host.etymology?.components.map(\.char)) ?? [])
+        // Curated common-radical pool — frequently-occurring radicals
+        // across HSK 1-3 so the distractors look plausible.
+        let pool = ["口", "心", "月", "日", "木", "火", "水", "人",
+                    "女", "子", "大", "小", "土", "金", "言", "马",
+                    "门", "山", "石", "目", "手", "刀", "力", "云"]
+        let distractors = pool.filter { !hostComponents.contains($0) && $0 != correct }
+            .shuffled()
+            .prefix(3)
+        var options = Array(distractors) + [correct]
+        while options.count < 4 {
+            options.append("—")
+        }
+        return options.shuffled()
+    }
+
+    /// Three random distractors plus the correct answer, shuffled. Pulls
+    /// from the rest of the session's entries first (contextually closest);
+    /// falls back to padding when the session is too small.
+    private func quizDistractors(for kind: InterPassQuiz.Kind,
+                                  correct: String,
+                                  excludingEntry entry: PracticeEntry) -> [String] {
+        // .component has its own dedicated distractor pool — handle
+        // separately below. This routine is for meaning / pinyin.
+        var pool: [String] = []
+        for other in practiceEntries where other.word != entry.word {
+            let value: String = {
+                switch kind {
+                case .meaning:   return entryMeaning(other).firstPart
+                case .pinyin:    return entryPinyin(other)
+                case .component: return ""  // never used for components
+                }
+            }()
+            if !value.isEmpty && value != correct {
+                pool.append(value)
+            }
+        }
+        // Dedupe while preserving order, then shuffle and take 3.
+        var seen = Set<String>([correct])
+        let distractors = pool.filter { seen.insert($0).inserted }
+            .shuffled()
+            .prefix(3)
+        var options = Array(distractors) + [correct]
+        // Pad if the session was tiny.
+        while options.count < 4 {
+            options.append("—")
+        }
+        return options.shuffled()
+    }
+
+    /// View shown when `phase == .interPassQuiz`. Multiple-choice
+    /// question with reveal-and-continue logic. Within the queue, each
+    /// question is answered one at a time; wrong answers are remembered
+    /// but the user still proceeds through the rest, so they see the
+    /// reveal for each. After the last question they either advance
+    /// (all correct) or redo the pass (any wrong).
+    @ViewBuilder
+    private func interPassQuizView(_ quiz: InterPassQuiz) -> some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("QUICK CHECK")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if currentQuizQueue.count > 1 {
+                    Text("\(quizQueueIndex + 1) / \(currentQuizQueue.count)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(quiz.prompt)
+                .font(.system(size: 22, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .padding(.bottom, 8)
+            ForEach(quiz.options, id: \.self) { option in
+                quizOptionButton(quiz: quiz, option: option)
+            }
+            if quizSelection != nil {
+                let isLast = quizQueueIndex >= currentQuizQueue.count - 1
+                let wasCorrect = quizSelection == quiz.correct
+                VStack(spacing: 8) {
+                    if !wasCorrect {
+                        Text("Correct: \(quiz.correct)")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    Button {
+                        if isLast {
+                            commitQuizSet()
+                        } else {
+                            advanceWithinQuizQueue()
+                        }
+                    } label: {
+                        Text(isLast
+                             ? (quizAnyWrong ? "Redo this pass" : "Continue")
+                             : "Next question")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(isLast && quizAnyWrong ? Theme.warning : Theme.accent)
+                            )
+                    }
+                }
+                .padding(.top, 8)
+            }
+            Spacer()
+        }
+        .padding(.top, 12)
+    }
+
+    /// Advance to the next question in the current quiz queue.
+    private func advanceWithinQuizQueue() {
+        if quizSelection != currentQuiz?.correct {
+            quizAnyWrong = true
+        }
+        quizQueueIndex += 1
+        quizSelection = nil
+    }
+
+    /// All questions in the queue have been answered. Either advance the
+    /// pass (all correct) or restart the pass (any wrong).
+    private func commitQuizSet() {
+        if quizSelection != currentQuiz?.correct {
+            quizAnyWrong = true
+        }
+        let anyWrong = quizAnyWrong
+        if let q = currentQuizQueue.first {
+            quizzedEntryIndices.insert(q.entryIndex)
+        }
+        currentQuizQueue = []
+        quizQueueIndex = 0
+        quizSelection = nil
+        quizAnyWrong = false
+        if anyWrong {
+            rebuildCanvasesForCurrentEntry()
+            phase = .writing
+        } else {
+            advanceToNextVisible()
+        }
+    }
+
+    private func quizOptionButton(quiz: InterPassQuiz, option: String) -> some View {
+        let answered = quizSelection != nil
+        let isCorrect = option == quiz.correct
+        let isChosen = option == quizSelection
+        let bg: Color = {
+            guard answered else { return Theme.card }
+            if isCorrect { return Theme.accent.opacity(0.85) }
+            if isChosen  { return Theme.warning.opacity(0.85) }
+            return Theme.card
+        }()
+        let fg: Color = (answered && (isCorrect || isChosen))
+            ? .white : .primary
+        return Button {
+            guard quizSelection == nil else { return }
+            quizSelection = option
+        } label: {
+            HStack {
+                Text(option)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(fg)
+                    .multilineTextAlignment(.leading)
+                Spacer()
+                if answered, isCorrect {
+                    Image(systemName: "checkmark").foregroundStyle(.white)
+                } else if answered, isChosen {
+                    Image(systemName: "xmark").foregroundStyle(.white)
+                }
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(bg)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(answered)
+    }
+
 }
 
 // MARK: - Practice mode
@@ -1178,14 +1900,16 @@ struct GradingSheet: View {
     }
 
     private var pinyin: String {
-        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+        if entry.isWord,
+           let w = UserDataController(context: modelContext).lookupWord(entry.word) {
             return w.pinyin
         }
         return entry.characters.first?.pinyin ?? ""
     }
 
     private var meaning: String {
-        if entry.isWord, let w = WordDictionary.shared.entry(for: entry.word) {
+        if entry.isWord,
+           let w = UserDataController(context: modelContext).lookupWord(entry.word) {
             return w.gloss
         }
         return entry.characters.first?.meaning ?? ""
@@ -1241,7 +1965,7 @@ struct GradingSheet: View {
     private var headerContent: some View {
         Button {
             if entry.characters.count > 1 {
-                peekWord = WordDictionary.shared.entry(for: entry.word)
+                peekWord = UserDataController(context: modelContext).lookupWord(entry.word)
                     ?? WordEntry(simplified: entry.word,
                                  traditional: entry.word,
                                  pinyin: pinyin,
@@ -1413,6 +2137,25 @@ struct GradingSheet: View {
         case .hard:  Color(hex: 0xC9A13C)
         case .good:  Theme.accent
         case .easy:  Color(hex: 0x6789C2)
+        }
+    }
+}
+
+/// View modifier that optionally adds the pinch gesture + bottom-right
+/// resize handle to a canvas. `enabled` lets us hide the affordance in
+/// Fit mode where resizing has no visible effect.
+private struct ResizableCanvasModifier<Handle: View, G: Gesture>: ViewModifier {
+    let enabled: Bool
+    let handle: Handle
+    let gesture: G
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .simultaneousGesture(gesture)
+                .overlay(alignment: .bottomTrailing) { handle }
+        } else {
+            content
         }
     }
 }

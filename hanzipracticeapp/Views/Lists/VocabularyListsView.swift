@@ -428,7 +428,9 @@ struct ListDetailView: View {
     /// (component characters, pinyin, definition); the remove button is
     /// a sibling button so it doesn't trigger the row navigation.
     private func wordRow(_ word: String) -> some View {
-        let entry = WordDictionary.shared.entry(for: word)
+        // Custom definitions override CC-CEDICT — surfaces the user's
+        // own pinyin/meaning in the vocab list rows.
+        let entry = UserDataController(context: modelContext).lookupWord(word)
         return HStack(spacing: 14) {
             Button {
                 peekWord = entry ?? WordEntry(simplified: word,
@@ -586,6 +588,7 @@ struct AddCharactersSheet: View {
 
     @State private var query: String = ""
     @State private var showingPasteImport: Bool = false
+    @State private var showingCustomWord: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -637,11 +640,21 @@ struct AddCharactersSheet: View {
                     } label: {
                         Label("Paste text import", systemImage: "doc.text.viewfinder")
                     }
+                    Spacer()
+                    Button {
+                        showingCustomWord = true
+                    } label: {
+                        Label("Custom word", systemImage: "square.and.pencil")
+                    }
                 }
             }
             .sheet(isPresented: $showingPasteImport) {
                 BulkListImportSheet(lockedList: list)
                     .presentationDetents([.large])
+            }
+            .sheet(isPresented: $showingCustomWord) {
+                CustomWordSheet(list: list)
+                    .presentationDetents([.medium, .large])
             }
         }
     }
@@ -708,6 +721,123 @@ struct AddCharactersSheet: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+}
+
+// MARK: - Custom word sheet
+
+/// Form for adding a user-defined multi-character word + the user's own
+/// pinyin + meaning. The word string must be at least one CJK character;
+/// pinyin and meaning are free-form text. On save the entry is added to
+/// the current vocab list AND the custom definition is persisted so it
+/// appears wherever else the word is rendered.
+struct CustomWordSheet: View {
+    @Bindable var list: VocabularyList
+    @Environment(\.modelContext) private var modelContext
+    @Environment(CharacterStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var word: String = ""
+    @State private var pinyin: String = ""
+    @State private var meaning: String = ""
+
+    private var canonicalWord: String {
+        // Canonicalise to Simplified per-character so traditional input
+        // round-trips into the same storage key as the rest of the app.
+        String(word.compactMap { ch -> Character? in
+            VariantClassifier.shared.canonical(String(ch)).first
+        })
+    }
+
+    private var trimmedWord: String {
+        word.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedPinyin: String {
+        pinyin.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedMeaning: String {
+        meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var allValidHanzi: Bool {
+        guard !trimmedWord.isEmpty else { return false }
+        for ch in trimmedWord {
+            let s = ch.unicodeScalars.first?.value ?? 0
+            let isCJK = (s >= 0x4E00 && s <= 0x9FFF)
+                || (s >= 0x3400 && s <= 0x4DBF)
+            if !isCJK { return false }
+        }
+        return true
+    }
+
+    private var canSave: Bool {
+        allValidHanzi
+            && trimmedWord.count >= 1
+            && !trimmedPinyin.isEmpty
+            && !trimmedMeaning.isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("e.g. 加菲猫", text: $word)
+                        .font(Theme.hanzi(28))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Hanzi")
+                } footer: {
+                    if !word.isEmpty && !allValidHanzi {
+                        Text("Only Chinese characters allowed.")
+                            .foregroundStyle(Theme.warning)
+                    } else {
+                        Text("Combine any existing hanzi. The word is stored in the Simplified form regardless of which variant you type.")
+                    }
+                }
+                Section("Pinyin") {
+                    TextField("e.g. jiā fēi māo", text: $pinyin)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                Section("Meaning") {
+                    TextField("e.g. Garfield (the cat)", text: $meaning, axis: .vertical)
+                        .lineLimit(1...4)
+                }
+                if !canonicalWord.isEmpty && canonicalWord != trimmedWord {
+                    Section("Canonical (Simplified)") {
+                        Text(canonicalWord)
+                            .font(Theme.hanzi(20))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Custom word")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") { save() }
+                        .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        let controller = UserDataController(context: modelContext)
+        // Persist the user's pinyin/meaning so it shows wherever the
+        // word is rendered later — practice header, quizzes, list rows.
+        _ = controller.upsertCustomWord(word: canonicalWord,
+                                        pinyin: trimmedPinyin,
+                                        meaning: trimmedMeaning,
+                                        traditional: trimmedWord != canonicalWord ? trimmedWord : nil)
+        controller.addEntry(canonicalWord, to: list)
+        dismiss()
     }
 }
 

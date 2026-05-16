@@ -17,6 +17,7 @@ struct StatsView: View {
 
     @Query private var cards: [SRSCard]
     @Query private var quizCards: [SRSQuizCard]
+    @Query private var lists: [VocabularyList]
     @Query(sort: \PracticeRecord.date, order: .reverse) private var records: [PracticeRecord]
 
     var body: some View {
@@ -24,18 +25,21 @@ struct StatsView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     summaryCards
+                    // All three decks share the same total — the user's
+                    // entire studied set. Each entry counts toward every
+                    // deck; the *state buckets* differ per mode because
+                    // they reflect how much practice has happened in
+                    // that skill.
+                    let allEntries = allStudiedEntries
                     deckDistribution(title: "WRITING DECK",
-                                     states: cards.map { $0.state })
-                    let reading = quizCards.filter { $0.quizMode == .reading }
-                    if !reading.isEmpty {
-                        deckDistribution(title: "READING DECK",
-                                         states: reading.map { $0.state })
-                    }
-                    let translation = quizCards.filter { $0.quizMode == .translation }
-                    if !translation.isEmpty {
-                        deckDistribution(title: "TRANSLATION DECK",
-                                         states: translation.map { $0.state })
-                    }
+                                     states: deckStates(entries: allEntries,
+                                                        mode: .writing))
+                    deckDistribution(title: "READING DECK",
+                                     states: deckStates(entries: allEntries,
+                                                        mode: .readingQuiz))
+                    deckDistribution(title: "TRANSLATION DECK",
+                                     states: deckStates(entries: allEntries,
+                                                        mode: .translationQuiz))
                     hskProgress
                     practiceActivity
                     strokeAccuracyChart
@@ -46,6 +50,56 @@ struct StatsView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Learning Progress")
             .navigationBarTitleDisplayMode(.large)
+        }
+    }
+
+    /// Union of: every entry the user has in a vocab list, every entry
+    /// they have a writing card for, and every entry they have a quiz
+    /// card for. That's the "vocab the user is learning" — and all three
+    /// deck distributions share it as the denominator so the numbers
+    /// compare apples-to-apples across skills.
+    private var allStudiedEntries: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for list in lists {
+            for entry in list.effectiveEntries where seen.insert(entry).inserted {
+                out.append(entry)
+            }
+        }
+        for c in cards where seen.insert(c.characterID).inserted {
+            out.append(c.characterID)
+        }
+        for c in quizCards where seen.insert(c.entryKey).inserted {
+            out.append(c.entryKey)
+        }
+        return out
+    }
+
+    /// Internal label for which deck we're computing — matches the three
+    /// learnable dimensions: writing strokes, recalling pinyin, recalling
+    /// meaning.
+    private enum DeckKind { case writing, readingQuiz, translationQuiz }
+
+    /// For every entry, determine its state in the given mode. Entries
+    /// without a card in that mode count as `.new` — they're in your
+    /// vocab but you haven't started learning *that skill* yet.
+    private func deckStates(entries: [String], mode: DeckKind) -> [SRSCard.DeckState] {
+        switch mode {
+        case .writing:
+            let byID = Dictionary(uniqueKeysWithValues: cards.map { ($0.characterID, $0) })
+            return entries.map { byID[$0]?.state ?? .new }
+        case .readingQuiz:
+            let key = QuizMode.reading
+            let byID = Dictionary(uniqueKeysWithValues:
+                quizCards.filter { $0.quizMode == key }
+                    .map { ($0.entryKey, $0) })
+            return entries.map { byID[$0]?.state ?? .new }
+        case .translationQuiz:
+            let key = QuizMode.translation
+            let byID = Dictionary(uniqueKeysWithValues:
+                quizCards.filter { $0.quizMode == key }
+                    .map { ($0.entryKey, $0) })
+            return entries.map { byID[$0]?.state ?? .new }
         }
     }
 

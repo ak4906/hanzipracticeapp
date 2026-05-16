@@ -543,7 +543,11 @@ struct CharacterDetailView: View {
                     .foregroundStyle(.primary)
                     .padding(.bottom, 4)
             }
-            ForEach(ety.components, id: \.char) { component in
+            // Defensive filter — primitives like 小/月/用 can still leak
+            // their own char into MMA's component list via variant pairs.
+            ForEach(ety.components.filter {
+                $0.char != character.char && $0.char != character.canonicalID
+            }, id: \.char) { component in
                 componentCard(component)
             }
             if let radical = character.radical,

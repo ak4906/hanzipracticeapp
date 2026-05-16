@@ -263,21 +263,28 @@ final class CharacterStore {
         let type = HanziType.fromMMA(mma.etymologyType)
         let phonetic = mma.phoneticComponent
         let semantic = mma.semanticComponent
-        // The IDS belongs to whatever MMA character we resolved to (which
-        // may be the traditional displayed form, not the canonical key).
+        // Skip any component reference that points back at the host
+        // character itself — both the canonical (simplified) key and the
+        // MMA-resolved (possibly traditional) form. Otherwise primitive
+        // chars like 用 / 月 / 心 self-reference because MMA either lists
+        // them as their own semantic component or the IDS contains them.
+        let isSelf: (String) -> Bool = { c in
+            c == mma.character || c == canonical
+        }
         let parts = Decomposition.components(in: mma.decomposition,
                                              excluding: mma.character)
+            .filter { !isSelf($0) }
 
         var components: [EtymologyComponent] = []
         var consumed = Set<String>()
 
         // For phono-semantic compounds the semantic + phonetic come first.
         if type == .phonosemantic {
-            if let s = semantic {
+            if let s = semantic, !isSelf(s) {
                 components.append(.init(char: s, role: .semantic))
                 consumed.insert(s)
             }
-            if let p = phonetic {
+            if let p = phonetic, !isSelf(p) {
                 components.append(.init(char: p,
                                         role: phonetic == semantic ? .both : .phonetic))
                 consumed.insert(p)
@@ -354,16 +361,23 @@ final class CharacterStore {
             case .pinyin:
                 // Compare against either the toned or the toneless field so
                 // "shī" only matches first-tone shi readings, while "shi"
-                // matches all four tones.
+                // matches all four tones. Pinyin mode is strictly pinyin —
+                // typing "beautiful" while in Pinyin mode should return
+                // nothing (no fallback to English meaning), otherwise the
+                // mode picker is useless.
                 let haystack = queryHasTone ? entry.pinyinLower : entry.pinyinToneless
                 if pinyinExactWordMatch(haystack: haystack, needle: q) { score = 95 }
                 else if pinyinPrefixWordMatch(haystack: haystack, needle: q) { score = 70 }
                 else if haystack.contains(q) { score = 50 }
-                else if !queryHasTone && entry.meaningLower.contains(q) { score = 40 }
                 else { score = nil }
             case .english:
-                if entry.meaningLower.contains(q) { score = 60 }
-                else { score = nil }
+                // Quick reject first — only run the relatively expensive
+                // tokenising rank pass when the entry could *possibly*
+                // match. 99% of the 10k entries fail this check on a
+                // typical query.
+                guard entry.meaningLower.contains(q) else { score = nil; break }
+                score = englishMatchScore(meaning: entry.meaningLower,
+                                          query: q)
             case .auto:
                 score = nil
             }
@@ -401,6 +415,45 @@ final class CharacterStore {
         for token in haystack.split(separator: " ")
             where token.hasPrefix(needle) { return true }
         return false
+    }
+
+    /// Score an English search hit. Higher is more relevant.
+    /// The meaning text is split into individual definitions by `,;()/` so
+    /// "to eat, to consume" produces two pieces, each scored separately
+    /// against the query. A definition that *equals* the query (or is the
+    /// query prefixed by "to ") gets the top score; a whole-word match
+    /// within a short definition outranks a substring match in a long one;
+    /// pure-substring matches (e.g. "eat" inside "great") get the lowest
+    /// score so they don't crowd out direct matches.
+    private func englishMatchScore(meaning: String, query: String) -> Int? {
+        let definitions = meaning
+            .split(whereSeparator: { ",;()/[]".contains($0) })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        var best: Int = 0
+        for def in definitions {
+            if def == query || def == "to \(query)" {
+                return 1000   // perfect: this character's definition *is* the query
+            }
+            // Tokenise the definition into words; whole-word match is what
+            // distinguishes the canonical character from coincidental hits.
+            let words = def.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map { String($0) }
+            if words.contains(query) {
+                // Shorter definitions score higher — "eat" alone is more
+                // canonical than "eat (a small bite of something)".
+                let score = 600 - min(300, def.count * 4)
+                if score > best { best = score }
+            } else if def.hasPrefix(query + " ") {
+                if 400 > best { best = 400 }
+            } else if def.contains(query) {
+                if 100 > best { best = 100 }
+            }
+        }
+        if best == 0 {
+            return meaning.contains(query) ? 20 : nil
+        }
+        return best
     }
 
     // MARK: - Curated convenience views

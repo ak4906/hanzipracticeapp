@@ -21,6 +21,7 @@ struct hanzipracticeappApp: App {
             SRSCard.self,
             SRSQuizCard.self,
             VocabularyList.self,
+            CustomWordEntry.self,
             PracticeRecord.self,
             RecentLookup.self,
             UserSettings.self

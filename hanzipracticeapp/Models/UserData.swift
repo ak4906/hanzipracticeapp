@@ -188,6 +188,38 @@ enum QuizMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - User-supplied custom words
+
+/// A multi-character vocab entry the user defined themselves — they
+/// picked the hanzi combination and wrote their own pinyin + meaning.
+/// Used when CC-CEDICT doesn't have the word they want to study (rare
+/// compound nicknames, slang, brand transliterations, etc.).
+@Model
+final class CustomWordEntry {
+    /// Canonical (Simplified) word string. Unique so the user can only
+    /// have one definition per word.
+    @Attribute(.unique) var word: String
+    /// User-supplied pinyin (tone marks expected; not validated).
+    var customPinyin: String
+    /// User-supplied English meaning.
+    var customMeaning: String
+    /// Optional traditional rendering — falls back to per-char conversion
+    /// when nil.
+    var customTraditional: String?
+    var dateAdded: Date
+
+    init(word: String,
+         customPinyin: String,
+         customMeaning: String,
+         customTraditional: String? = nil) {
+        self.word = word
+        self.customPinyin = customPinyin
+        self.customMeaning = customMeaning
+        self.customTraditional = customTraditional
+        self.dateAdded = .now
+    }
+}
+
 // MARK: - Vocabulary lists
 
 @Model
@@ -354,6 +386,20 @@ final class UserSettings {
     /// scroll/swipe between them — better for long words).
     var practiceCanvasFitRaw: String?
 
+    /// Hard cap on the single-canvas square size in points. Optional so
+    /// existing rows lightweight-migrate; nil = no cap (matches Phase B
+    /// behaviour). Mostly useful on iPad where the canvas otherwise
+    /// stretches across the whole screen — at 800pt of width, writing
+    /// becomes uncomfortably arm-wide.
+    var practiceCanvasMaxSize: Int?
+
+    /// When true, the writing session inserts a multiple-choice quiz
+    /// question between each pass — "what does X mean?", "how is X
+    /// pronounced?" — to force the user to consciously associate
+    /// strokes with meaning before going to memory. Optional so existing
+    /// rows migrate cleanly; treated as false (off) by default.
+    var interPassQuizEnabled: Bool?
+
     init(dailyNewLimit: Int = 10,
          soundsEnabled: Bool = true,
          preferTraditional: Bool = false,
@@ -361,7 +407,9 @@ final class UserSettings {
          dailyReviewLimit: Int? = nil,
          practiceChunkSize: Int? = nil,
          writingDirectionRaw: String? = nil,
-         practiceCanvasFitRaw: String? = nil) {
+         practiceCanvasFitRaw: String? = nil,
+         practiceCanvasMaxSize: Int? = nil,
+         interPassQuizEnabled: Bool? = nil) {
         self.dailyNewLimit = dailyNewLimit
         self.soundsEnabled = soundsEnabled
         self.preferTraditional = preferTraditional
@@ -370,6 +418,8 @@ final class UserSettings {
         self.practiceChunkSize = practiceChunkSize
         self.writingDirectionRaw = writingDirectionRaw
         self.practiceCanvasFitRaw = practiceCanvasFitRaw
+        self.practiceCanvasMaxSize = practiceCanvasMaxSize
+        self.interPassQuizEnabled = interPassQuizEnabled
     }
 
     /// Effective values with sensible fallbacks — use these from views.

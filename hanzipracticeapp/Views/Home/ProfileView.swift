@@ -156,15 +156,39 @@ private struct SettingsSections: View {
                     Text(f.displayName).tag(f)
                 }
             }
+            // Stepper rather than a fixed-tag picker because the live
+            // in-session pinch / resize-handle can land on any value
+            // between 120 and 1000pt — a discrete picker would warn
+            // "selection X is invalid" whenever the live value doesn't
+            // match one of its preset tags.
+            Stepper("Max canvas size: \(canvasMaxSizeBinding.wrappedValue)pt",
+                    value: canvasMaxSizeBinding,
+                    in: 120...1000,
+                    step: 20)
         } header: {
             Text("Multi-character layout")
         } footer: {
-            Text("Direction sets how the characters of a multi-character word (容易, 冰激凌) are laid out during writing practice. Canvas size lets you choose between fitting all the canvases on one screen, or keeping each one full size and scrolling / swiping to the next.")
+            Text("Direction sets how the characters of a multi-character word (容易, 冰激凌) are laid out during writing practice. Canvas size chooses between fitting all canvases on one screen or scrolling between them. Max canvas size caps how big a single canvas can grow — useful on iPad where the canvas otherwise stretches across the whole screen.")
+        }
+
+        Section {
+            Toggle("Quiz between passes", isOn: interPassQuizBinding)
+        } header: {
+            Text("Recall prompts")
+        } footer: {
+            Text("Between each pass of the 3-pass writing drill, ask a quick multiple-choice question about what you just wrote (meaning, pinyin). Wrong answer = redo the pass. Off for quick blast-through sessions; on when you want to commit characters to deep memory.")
         }
 
         Section("Other") {
             Toggle("Sounds & pronunciation", isOn: $settings.soundsEnabled)
         }
+    }
+
+    private var interPassQuizBinding: Binding<Bool> {
+        Binding(
+            get: { settings.interPassQuizEnabled ?? false },
+            set: { settings.interPassQuizEnabled = $0 }
+        )
     }
 
     private var dailyReviewLimitBinding: Binding<Int> {
@@ -192,6 +216,13 @@ private struct SettingsSections: View {
         Binding(
             get: { settings.effectivePracticeCanvasFit },
             set: { settings.practiceCanvasFitRaw = $0.rawValue }
+        )
+    }
+
+    private var canvasMaxSizeBinding: Binding<Int> {
+        Binding(
+            get: { settings.practiceCanvasMaxSize ?? 360 },
+            set: { settings.practiceCanvasMaxSize = $0 }
         )
     }
 
@@ -255,6 +286,9 @@ struct DangerZoneView: View {
         }
         if let quizCards = try? context.fetch(FetchDescriptor<SRSQuizCard>()) {
             for c in quizCards { context.delete(c) }
+        }
+        if let custom = try? context.fetch(FetchDescriptor<CustomWordEntry>()) {
+            for c in custom { context.delete(c) }
         }
         if let recs = try? context.fetch(FetchDescriptor<PracticeRecord>()) {
             for r in recs { context.delete(r) }

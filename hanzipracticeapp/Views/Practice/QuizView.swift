@@ -72,10 +72,12 @@ struct QuizView: View {
     private var pinyin: String {
         guard let entry = currentEntry else { return "" }
         if entry.count > 1 {
-            if let w = WordDictionary.shared.entry(for: entry) { return w.pinyin }
-            // Fallback for multi-char entries CC-CEDICT doesn't know — give
-            // the user *something* (per-char pinyins joined) rather than
-            // misleadingly showing only the first char's pronunciation.
+            if let w = UserDataController(context: modelContext).lookupWord(entry) {
+                return w.pinyin
+            }
+            // Fallback for multi-char entries with no custom or CC-CEDICT
+            // definition — give the user *something* (per-char pinyins
+            // joined) rather than misleadingly showing just the first.
             return currentCharacters.map(\.pinyin).joined(separator: " ")
         }
         return currentCharacters.first?.pinyin ?? ""
@@ -84,7 +86,9 @@ struct QuizView: View {
     private var meaning: String {
         guard let entry = currentEntry else { return "" }
         if entry.count > 1 {
-            if let w = WordDictionary.shared.entry(for: entry) { return w.gloss }
+            if let w = UserDataController(context: modelContext).lookupWord(entry) {
+                return w.gloss
+            }
             // Unknown word — best we can do is list the constituent chars'
             // individual glosses so the quiz isn't useless.
             return currentCharacters.map(\.meaning).joined(separator: " · ")
@@ -256,7 +260,7 @@ struct QuizView: View {
         if currentCharacters.count > 1 {
             Button {
                 let entry = currentEntry ?? ""
-                peekWord = WordDictionary.shared.entry(for: entry)
+                peekWord = UserDataController(context: modelContext).lookupWord(entry)
                     ?? WordEntry(simplified: entry,
                                  traditional: entry,
                                  pinyin: pinyin,

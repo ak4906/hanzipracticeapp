@@ -23,12 +23,47 @@ struct WordEntry: Hashable, Identifiable, Sendable {
     let traditional: String
     let pinyin: String         // tone-marked, space-separated syllables
     let gloss: String          // English definitions joined by "; "
+    /// Pre-lowercased gloss for fast substring matching during search —
+    /// avoids re-lowering 110k entries on every keystroke.
+    let glossLower: String
+    /// Pre-stripped pinyin for fuzzy matching ("rongyi" → "róng yì").
+    let pinyinToneless: String
 
     var id: String { simplified }
 
-    /// Pinyin with no tone marks, lower-cased — used for fuzzy search like
-    /// "rongyi" matching "róng yì".
-    var pinyinToneless: String { pinyin.toneStripped }
+    /// Memberwise init with everything explicit — used by the bundled-file
+    /// parser where we want to precompute the derived fields once.
+    /// Explicitly nonisolated so the background TSV parser (which runs
+    /// off the main actor) can construct entries.
+    nonisolated init(simplified: String,
+                     traditional: String,
+                     pinyin: String,
+                     gloss: String,
+                     glossLower: String,
+                     pinyinToneless: String) {
+        self.simplified = simplified
+        self.traditional = traditional
+        self.pinyin = pinyin
+        self.gloss = gloss
+        self.glossLower = glossLower
+        self.pinyinToneless = pinyinToneless
+    }
+
+    /// Convenience init for code paths that synthesise a `WordEntry` on
+    /// the fly (e.g. opening the word detail sheet for a vocab-list entry
+    /// CC-CEDICT doesn't know about). Derives the lowered / toneless
+    /// fields automatically.
+    nonisolated init(simplified: String,
+                     traditional: String,
+                     pinyin: String,
+                     gloss: String) {
+        self.init(simplified: simplified,
+                  traditional: traditional,
+                  pinyin: pinyin,
+                  gloss: gloss,
+                  glossLower: gloss.lowercased(),
+                  pinyinToneless: pinyin.toneStripped)
+    }
 
     /// First definition only, useful for compact list rows.
     var firstGloss: String {
@@ -136,22 +171,118 @@ final class WordDictionary {
     /// Linear-scan search. Slow for autocomplete-on-every-keystroke at 110k
     /// entries (~30-50 ms), so callers should debounce. Matches simplified,
     /// pinyin (tone-marked or toneless), or English gloss — case-insensitive.
-    func search(_ query: String, limit: Int = 50) -> [WordEntry] {
+    ///
+    /// Results are *ranked* — an exact-gloss / exact-pinyin / exact-hanzi
+    /// match outranks a coincidental substring match. Earlier the function
+    /// just returned the first N raw hits in load order, which buried the
+    /// obvious answer for queries like "eat" under hundreds of long
+    /// idiom glosses that happened to contain the substring.
+    /// Which kinds of matches `search` is allowed to score, mirroring
+    /// `CharacterStore.SearchMode`. In `.pinyin` we won't return English
+    /// gloss matches; in `.english` we won't return hanzi/pinyin matches;
+    /// `.auto` and `.hanzi` consider everything.
+    enum Scope { case auto, hanzi, pinyin, english }
+
+    func search(_ query: String, scope: Scope = .auto, limit: Int = 50) -> [WordEntry] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return [] }
         let qToneless = q.toneStripped
-        var out: [WordEntry] = []
-        out.reserveCapacity(limit)
+        let raw = query.trimmingCharacters(in: .whitespaces)
+        var hits: [(WordEntry, Int)] = []
         for entry in all {
-            if entry.simplified.contains(query)
-                || entry.traditional.contains(query)
-                || entry.pinyinToneless.contains(qToneless)
-                || entry.gloss.lowercased().contains(q) {
-                out.append(entry)
-                if out.count >= limit { break }
+            // Cheap reject — only call the expensive ranking on entries
+            // that have *some* substring match anywhere. Drops 99%+ of
+            // the 110k entries in the inner loop for typical queries.
+            let hanziHit = entry.simplified.contains(raw)
+                || entry.traditional.contains(raw)
+            let pinyinHit = entry.pinyinToneless.contains(qToneless)
+            let glossHit = entry.glossLower.contains(q)
+            // Filter the reject pass by scope so a Pinyin-mode search for
+            // "beautiful" can't sneak through via a gloss hit.
+            let candidate: Bool = {
+                switch scope {
+                case .auto, .hanzi: return hanziHit || pinyinHit || glossHit
+                case .pinyin:       return pinyinHit
+                case .english:      return glossHit
+                }
+            }()
+            guard candidate else { continue }
+            let score = matchScore(entry: entry,
+                                   query: q,
+                                   queryToneless: qToneless,
+                                   rawQuery: raw,
+                                   scope: scope)
+            if score > 0 {
+                hits.append((entry, score))
             }
         }
-        return out
+        return hits.sorted { $0.1 > $1.1 }
+            .prefix(limit)
+            .map(\.0)
+    }
+
+    /// Per-entry relevance score. Higher = more relevant. Tuned so direct
+    /// hits on the *whole* simplified / pinyin reading / English gloss
+    /// outrank substring-only matches, and shorter glosses outrank long
+    /// ones (a definition that just says "easy" beats one that says
+    /// "easy, simple, light, painless, comfortable, smooth, etc.").
+    private func matchScore(entry: WordEntry,
+                            query q: String,
+                            queryToneless qt: String,
+                            rawQuery raw: String,
+                            scope: Scope) -> Int {
+        var best = 0
+        let considerHanzi = scope == .auto || scope == .hanzi
+        let considerPinyin = scope == .auto || scope == .pinyin
+        let considerEnglish = scope == .auto || scope == .english
+        // Hanzi / traditional matches.
+        if considerHanzi {
+            if entry.simplified == raw || entry.traditional == raw { return 1500 }
+            if entry.simplified.hasPrefix(raw) || entry.traditional.hasPrefix(raw) {
+                best = max(best, 900)
+            } else if entry.simplified.contains(raw) || entry.traditional.contains(raw) {
+                best = max(best, 250)
+            }
+        }
+        // Pinyin tokens.
+        if considerPinyin {
+            let pinyinHay = qt == q ? entry.pinyinToneless : entry.pinyin
+            let pyTokens = pinyinHay.split(separator: " ").map { String($0) }
+            if pyTokens == qt.split(separator: " ").map({ String($0) }) {
+                best = max(best, 1000)
+            } else if pyTokens.contains(qt) {
+                best = max(best, 700)
+            } else if pyTokens.contains(where: { $0.hasPrefix(qt) }) {
+                best = max(best, 350)
+            } else if entry.pinyinToneless.contains(qt) {
+                best = max(best, 150)
+            }
+        }
+        // English gloss — pick the strongest of the slash/semicolon-split
+        // definitions, with a shorter-definition bonus so the canonical
+        // entry beats one where the same word is buried in a long list.
+        if considerEnglish {
+            let defs = entry.glossLower
+                .split(whereSeparator: { ",;()/[]".contains($0) })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            for def in defs {
+                if def == q || def == "to \(q)" {
+                    best = max(best, 1100)
+                    continue
+                }
+                let words = def.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                    .map { String($0) }
+                if words.contains(q) {
+                    best = max(best, 700 - min(300, def.count * 3))
+                } else if def.hasPrefix(q + " ") {
+                    best = max(best, 400)
+                } else if def.contains(q) {
+                    best = max(best, 80)
+                }
+            }
+        }
+        return best
     }
 
     /// Parse one TSV line. Returns nil for malformed rows so a single bad
@@ -160,9 +291,13 @@ final class WordDictionary {
     nonisolated private static func parse(line: Substring) -> WordEntry? {
         let parts = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
         guard parts.count == 4 else { return nil }
+        let gloss = String(parts[3])
+        let pinyin = String(parts[2])
         return WordEntry(simplified: String(parts[0]),
                          traditional: String(parts[1]),
-                         pinyin: String(parts[2]),
-                         gloss: String(parts[3]))
+                         pinyin: pinyin,
+                         gloss: gloss,
+                         glossLower: gloss.lowercased(),
+                         pinyinToneless: pinyin.toneStripped)
     }
 }

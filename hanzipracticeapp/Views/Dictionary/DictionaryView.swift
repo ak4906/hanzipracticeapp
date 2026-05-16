@@ -27,6 +27,11 @@ struct DictionaryView: View {
     @Query(sort: \RecentLookup.lastViewed, order: .reverse) private var recents: [RecentLookup]
 
     @State private var query: String = ""
+    /// Debounced copy of `query` used by the search machinery. Updated
+    /// ~250ms after the user stops typing so we don't run a 110k-entry
+    /// scan on every keystroke.
+    @State private var debouncedQuery: String = ""
+    @State private var debounceTask: Task<Void, Never>? = nil
     @State private var mode: CharacterStore.SearchMode = .auto
     @State private var path: [DictionaryNav] = []
     /// Tapping a CC-CEDICT word match opens this quick detail sheet rather
@@ -91,6 +96,23 @@ struct DictionaryView: View {
             }
             .onAppear {
                 consumeJumpToListsIfNeeded()
+            }
+            .onChange(of: query) { _, newValue in
+                // Cancel any in-flight debounce timer and start a fresh
+                // one. After 250ms of typing-quiet, snapshot the latest
+                // query into `debouncedQuery`, which is what the search
+                // helpers actually read.
+                debounceTask?.cancel()
+                if newValue.isEmpty {
+                    debouncedQuery = ""
+                    return
+                }
+                debounceTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if !Task.isCancelled {
+                        debouncedQuery = newValue
+                    }
+                }
             }
             .sheet(item: $selectedWord) { word in
                 WordDetailSheet(word: word)
@@ -229,46 +251,33 @@ struct DictionaryView: View {
     // MARK: - Search results
 
     private var searchResults: some View {
+        // Search runs against the debounced query so we don't re-scan the
+        // 110k-entry word dictionary on every keystroke. While the user
+        // is still mid-type (debouncedQuery still trails query) we just
+        // show the previous result set.
+        let q = debouncedQuery
         // Word search is limited to the `auto` and `english`/`pinyin` modes;
         // when the user has picked "Character" they presumably want raw
         // hanzi matches only.
-        let words: [WordEntry] = (mode == .hanzi)
+        let words: [WordEntry] = q.isEmpty
             ? []
-            : WordDictionary.shared.search(query, limit: 20)
-        let chars = store.search(query, mode: mode)
+            : WordDictionary.shared.search(q, scope: wordSearchScope, limit: 20)
+        let chars = q.isEmpty ? [] : store.search(q, mode: mode)
         let total = words.count + chars.count
         return VStack(alignment: .leading, spacing: 10) {
             Text("\(total) result\(total == 1 ? "" : "s")")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            if !words.isEmpty {
-                Text("WORDS")
+            // CHARACTERS come first now — when the user types an English
+            // meaning or a pinyin reading, the single hanzi that matches
+            // it is usually what they were after; words are secondary
+            // context.
+            if !chars.isEmpty {
+                Text("CHARACTERS")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(0.8)
                     .foregroundStyle(.secondary)
-                ForEach(words) { w in
-                    Button { selectedWord = w } label: {
-                        wordSearchRow(w)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(Theme.card)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if !chars.isEmpty {
-                if !words.isEmpty {
-                    Text("CHARACTERS")
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(0.8)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 6)
-                }
                 ForEach(chars) { c in
                     Button { path.append(.character(c)) } label: {
                         HanziListRow(character: c)
@@ -282,9 +291,41 @@ struct DictionaryView: View {
                     .buttonStyle(.plain)
                 }
             }
+
+            if !words.isEmpty {
+                Text("WORDS")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, chars.isEmpty ? 0 : 6)
+                ForEach(words) { w in
+                    Button { selectedWord = w } label: {
+                        wordSearchRow(w)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Theme.card)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             if total == 0 {
                 ContentUnavailableView.search(text: query)
             }
+        }
+    }
+
+    /// Translate the user's selected `CharacterStore.SearchMode` into the
+    /// equivalent scope for `WordDictionary.search`. Keeps both pickers in
+    /// sync so a Pinyin search there matches a Pinyin search here.
+    private var wordSearchScope: WordDictionary.Scope {
+        switch mode {
+        case .auto:    return .auto
+        case .hanzi:   return .hanzi
+        case .pinyin:  return .pinyin
+        case .english: return .english
         }
     }
 
@@ -344,9 +385,28 @@ struct WordDetailSheet: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.5)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(word.pinyin)
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(Theme.accent)
+                            HStack(spacing: 8) {
+                                Text(word.pinyin)
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundStyle(Theme.accent)
+                                Button {
+                                    // Speak the canonical Simplified form;
+                                    // TTS handles the right pronunciation
+                                    // regardless of which variant the user
+                                    // sees on screen.
+                                    Speech.shared.say(word.pinyin,
+                                                      locale: "zh-CN",
+                                                      text: word.simplified)
+                                } label: {
+                                    Image(systemName: "speaker.wave.2.fill")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(Theme.accent)
+                                        .padding(7)
+                                        .background(Circle().fill(Theme.accentSoft))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Play pronunciation")
+                            }
                             Text(word.gloss)
                                 .font(.system(size: 14))
                         }

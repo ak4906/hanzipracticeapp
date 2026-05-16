@@ -212,24 +212,15 @@ struct PracticeView: View {
                     )
             } else {
                 ForEach(lists) { list in
-                    Group {
-                        if list.effectiveEntries.isEmpty {
-                            NavigationLink {
-                                ListDetailView(list: list)
-                            } label: {
-                                listRow(list)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button {
-                                session = PracticeSession(entries: list.effectiveEntries,
-                                                          title: list.name)
-                            } label: {
-                                listRow(list)
-                            }
-                            .buttonStyle(.plain)
-                        }
+                    // Always navigate to detail — same fix as the Home
+                    // tab: jumping straight into practice without
+                    // showing the list contents was disorienting.
+                    NavigationLink {
+                        ListDetailView(list: list)
+                    } label: {
+                        listRow(list)
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }

@@ -102,6 +102,54 @@ struct UserDataController {
         return new
     }
 
+    // MARK: - Custom user-defined words
+
+    /// User-supplied custom definition for `word`, if any.
+    func customWord(for word: String) -> CustomWordEntry? {
+        let key = canonicaliseWord(word)
+        let descriptor = FetchDescriptor<CustomWordEntry>(
+            predicate: #Predicate { $0.word == key }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
+    /// Insert or overwrite a user-supplied custom word.
+    @discardableResult
+    func upsertCustomWord(word: String,
+                          pinyin: String,
+                          meaning: String,
+                          traditional: String? = nil) -> CustomWordEntry {
+        let key = canonicaliseWord(word)
+        if let existing = customWord(for: key) {
+            existing.customPinyin = pinyin
+            existing.customMeaning = meaning
+            existing.customTraditional = traditional
+            try? context.save()
+            return existing
+        }
+        let new = CustomWordEntry(word: key,
+                                  customPinyin: pinyin,
+                                  customMeaning: meaning,
+                                  customTraditional: traditional)
+        context.insert(new)
+        try? context.save()
+        return new
+    }
+
+    /// Look up a multi-character word — custom entries win over CC-CEDICT
+    /// so the user's definition is what shows everywhere.
+    @MainActor
+    func lookupWord(_ word: String) -> WordEntry? {
+        let key = canonicaliseWord(word)
+        if let c = customWord(for: key) {
+            return WordEntry(simplified: key,
+                             traditional: c.customTraditional ?? key,
+                             pinyin: c.customPinyin,
+                             gloss: c.customMeaning)
+        }
+        return WordDictionary.shared.entry(for: key)
+    }
+
     /// Quiz cards due now or earlier in a given mode.
     func dueQuizCards(mode: QuizMode, at date: Date = .now) -> [SRSQuizCard] {
         let raw = mode.rawValue
