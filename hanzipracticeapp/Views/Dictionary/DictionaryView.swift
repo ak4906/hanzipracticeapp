@@ -436,6 +436,20 @@ struct WordDetailSheet: View {
                     }
                 }
 
+                let sentences = SentenceCorpus.shared
+                    .sentences(containing: word.simplified, limit: 6)
+                if !sentences.isEmpty {
+                    Section {
+                        ForEach(sentences) { s in
+                            wordSentenceRow(s)
+                        }
+                    } header: {
+                        Text("Example sentences")
+                    } footer: {
+                        Text("From Tatoeba · CC-BY 2.0 FR")
+                    }
+                }
+
                 Section("Add to list") {
                     if lists.isEmpty {
                         Text("You don't have any lists yet — create one below.")
@@ -502,6 +516,32 @@ struct WordDetailSheet: View {
                 QuizView(session: q) { quizSession = nil }
             }
         }
+    }
+
+    private func wordSentenceRow(_ s: SentencePair) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(s.chinese)
+                    .font(Theme.hanzi(18))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                Button {
+                    Speech.shared.say("", locale: "zh-CN", text: s.chinese)
+                } label: {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .padding(6)
+                        .background(Circle().fill(Theme.accentSoft))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Play sentence")
+            }
+            Text(s.english)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 
     /// Three buttons that start a one-entry practice/quiz session on the

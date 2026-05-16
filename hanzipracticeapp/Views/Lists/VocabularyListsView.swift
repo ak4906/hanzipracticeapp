@@ -738,8 +738,11 @@ struct CustomWordSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var word: String = ""
-    @State private var pinyin: String = ""
-    @State private var meaning: String = ""
+    /// Pinyin / meaning overrides — when non-nil, the user has typed
+    /// their own value and we stop auto-overwriting it as they keep
+    /// editing the hanzi field. nil means "show the auto-derived value".
+    @State private var pinyinOverride: String? = nil
+    @State private var meaningOverride: String? = nil
 
     private var canonicalWord: String {
         // Canonicalise to Simplified per-character so traditional input
@@ -753,12 +756,43 @@ struct CustomWordSheet: View {
         word.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Pinyin derived from the canonical hanzi — joins each character's
+    /// MMA-resolved primary reading. Defends against the user typing a
+    /// wrong pinyin for the character they actually picked.
+    private var derivedPinyin: String {
+        canonicalWord.compactMap { ch -> String? in
+            let py = store.character(for: String(ch))?.pinyin ?? ""
+            return py.isEmpty ? nil : py
+        }
+        .joined(separator: " ")
+    }
+
+    /// Meaning suggestion — concatenated first-glosses of each character.
+    /// Not always semantically right (especially for transliterations),
+    /// but a sanity-check anchor: if it looks completely off, the user
+    /// probably typed the wrong-sound homophone character.
+    private var derivedMeaning: String {
+        canonicalWord.compactMap { ch -> String? in
+            let m = store.character(for: String(ch))?.meaning.firstPart
+            return (m?.isEmpty ?? true) ? nil : m
+        }
+        .joined(separator: " · ")
+    }
+
+    private var effectivePinyin: String {
+        pinyinOverride ?? derivedPinyin
+    }
+
+    private var effectiveMeaning: String {
+        meaningOverride ?? derivedMeaning
+    }
+
     private var trimmedPinyin: String {
-        pinyin.trimmingCharacters(in: .whitespacesAndNewlines)
+        effectivePinyin.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var trimmedMeaning: String {
-        meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        effectiveMeaning.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var allValidHanzi: Bool {
@@ -797,14 +831,55 @@ struct CustomWordSheet: View {
                         Text("Combine any existing hanzi. The word is stored in the Simplified form regardless of which variant you type.")
                     }
                 }
-                Section("Pinyin") {
-                    TextField("e.g. jiā fēi māo", text: $pinyin)
+                Section {
+                    HStack {
+                        Text(derivedPinyin.isEmpty ? "—" : derivedPinyin)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                        Spacer()
+                        if pinyinOverride != nil {
+                            Button("Reset") { pinyinOverride = nil }
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                    }
+                    TextField("Override pinyin (optional)",
+                              text: Binding(
+                                get: { pinyinOverride ?? "" },
+                                set: { newValue in
+                                    pinyinOverride = newValue.isEmpty ? nil : newValue
+                                }
+                              ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                } header: {
+                    Text("Pinyin")
+                } footer: {
+                    Text("Auto-derived from the hanzi above. Override only if the auto reading is wrong for the sense you mean (e.g. 长 cháng vs zhǎng).")
                 }
-                Section("Meaning") {
-                    TextField("e.g. Garfield (the cat)", text: $meaning, axis: .vertical)
+                Section {
+                    HStack(alignment: .top) {
+                        Text(derivedMeaning.isEmpty ? "—" : derivedMeaning)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if meaningOverride != nil {
+                            Button("Reset") { meaningOverride = nil }
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                    }
+                    TextField("Override meaning",
+                              text: Binding(
+                                get: { meaningOverride ?? "" },
+                                set: { newValue in
+                                    meaningOverride = newValue.isEmpty ? nil : newValue
+                                }
+                              ),
+                              axis: .vertical)
                         .lineLimit(1...4)
+                } header: {
+                    Text("Meaning")
+                } footer: {
+                    Text("Auto-derived as a concatenation of the constituent characters' meanings — usually a useful sanity check (if it looks wildly off, you probably picked a wrong-sound homophone). Almost always worth overriding with the actual word meaning.")
                 }
                 if !canonicalWord.isEmpty && canonicalWord != trimmedWord {
                     Section("Canonical (Simplified)") {

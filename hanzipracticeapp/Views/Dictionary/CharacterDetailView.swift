@@ -49,6 +49,7 @@ struct CharacterDetailView: View {
                 }
                 usedInCharactersSection
                 commonWordsSection
+                exampleSentencesSection
                 contextualUsage
                 addToListButton
                 if let m = character.mnemonic { mnemonicCard(text: m) }
@@ -421,6 +422,65 @@ struct CharacterDetailView: View {
             return "Used in characters you know · \(character.char)"
         }
         return "Characters using \(character.char)"
+    }
+
+    /// Real Mandarin sentences containing this character. Uses the
+    /// bundled Tatoeba corpus (CC-BY · https://tatoeba.org). Capped at
+    /// 6 so the section doesn't dominate the page; user can scroll the
+    /// detail page to see the rest of the surrounding context.
+    @ViewBuilder
+    private var exampleSentencesSection: some View {
+        let examples = SentenceCorpus.shared
+            .sentences(containing: character.canonicalID, limit: 6)
+        if !examples.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("EXAMPLE SENTENCES")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                ForEach(examples) { sentence in
+                    sentenceRow(sentence)
+                }
+                Text("Examples from Tatoeba · CC-BY 2.0 FR")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.card)
+            )
+        }
+    }
+
+    private func sentenceRow(_ sentence: SentencePair) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(sentence.chinese)
+                    .font(Theme.hanzi(18))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                Button {
+                    Speech.shared.say("",
+                                      locale: "zh-CN",
+                                      text: sentence.chinese)
+                } label: {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .padding(6)
+                        .background(Circle().fill(Theme.accentSoft))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Play sentence")
+            }
+            Text(sentence.english)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     /// Multi-character words containing this character — split into two

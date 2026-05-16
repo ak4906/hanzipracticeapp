@@ -64,7 +64,8 @@ private struct RootBootstrap<Content: View>: View {
             let userSettings = UserDataController(context: modelContext).settings()
             async let charBoot: Void = store.bootstrap(initialVariant: userSettings.preferTraditional ? .traditional : .simplified)
             async let wordBoot: Void = WordDictionary.shared.loadIfNeeded()
-            _ = await (charBoot, wordBoot)
+            async let sentenceBoot: Void = SentenceCorpus.shared.loadIfNeeded()
+            _ = await (charBoot, wordBoot, sentenceBoot)
         }
     }
 }
