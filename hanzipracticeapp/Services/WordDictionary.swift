@@ -65,12 +65,22 @@ struct WordEntry: Hashable, Identifiable, Sendable {
                   pinyinToneless: pinyin.toneStripped)
     }
 
-    /// First definition only, useful for compact list rows.
+    /// Gloss with CC-CEDICT-style numbered pinyin (`Xiang1 dong1 Qu1`)
+    /// converted to tone-marked form (`Xiāng dōng Qū`) for display.
+    /// The raw `gloss` field is kept intact so search ranking can still
+    /// match on the original text.
+    var displayGloss: String {
+        PinyinNumbers.convertBracketedTones(in: gloss)
+    }
+
+    /// First definition only, useful for compact list rows. Tone-marked
+    /// for the same reason as `displayGloss`.
     var firstGloss: String {
-        if let idx = gloss.firstIndex(of: ";") {
-            return String(gloss[..<idx])
+        let display = displayGloss
+        if let idx = display.firstIndex(of: ";") {
+            return String(display[..<idx])
         }
-        return gloss
+        return display
     }
 }
 

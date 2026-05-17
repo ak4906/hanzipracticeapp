@@ -201,7 +201,11 @@ struct DictionaryView: View {
             Text("Popular among HSK learners")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
-                .padding(.bottom, 8)
+                // Bumped from 8 → 20 so the tile's pencil badge in the
+                // top-right corner has visible separation from the
+                // subtitle baseline; at 8 the white circle was reading
+                // as overlapping the "HSK learners" text.
+                .padding(.bottom, 20)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14),
                                 GridItem(.flexible(), spacing: 14)],
                       spacing: 60) {
@@ -407,7 +411,7 @@ struct WordDetailSheet: View {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Play pronunciation")
                             }
-                            Text(word.gloss)
+                            Text(word.displayGloss)
                                 .font(.system(size: 14))
                         }
                     }
@@ -519,9 +523,13 @@ struct WordDetailSheet: View {
     }
 
     private func wordSentenceRow(_ s: SentencePair) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // Variant-map the displayed sentence so a Simplified-mode user
+        // doesn't see Traditional source chars from Tatoeba. TTS keeps
+        // using the original since pronunciation is the same.
+        let displayed = store.displayedSentence(s.chinese)
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top, spacing: 8) {
-                Text(s.chinese)
+                Text(displayed)
                     .font(Theme.hanzi(18))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 0)
@@ -537,6 +545,9 @@ struct WordDetailSheet: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Play sentence")
             }
+            Text(store.pinyinReading(for: s.chinese))
+                .font(.system(size: 12, weight: .semibold, design: .serif))
+                .foregroundStyle(Theme.accent)
             Text(s.english)
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)

@@ -38,8 +38,13 @@ struct HanziCharacter: Hashable, Identifiable, Sendable {
 
     var id: String { canonicalID }
 
-    let pinyin: String           // tone-marked
+    let pinyin: String           // tone-marked, primary reading
     let pinyinToneless: String   // search-friendly
+    /// All recognised readings for display ("dé / děi / de"). Falls
+    /// back to `pinyin` when only one reading is known. Sourced from
+    /// the chinese-lexicon bundle which catalogues every standard
+    /// pronunciation per character.
+    let pinyinAllReadings: String
     let meaning: String
     let hskLevel: Int            // 0 == outside HSK / unknown
     let strokeCount: Int

@@ -22,6 +22,15 @@ struct CharacterDetailView: View {
     @State private var animateStrokes: Bool = false
     @State private var animationKey: Int = 0
     @State private var showAddToList: Bool = false
+    /// Fires the "marked as known" toast (and disables further taps
+    /// on the same character) after the user pressed "I know this".
+    /// Reset whenever the page is dismissed/reloaded.
+    @State private var justMarkedKnown: Bool = false
+    /// Multi-char word the user tapped from "Common words with X" or
+    /// from inside an example sentence. Drives the word-detail
+    /// sheet so they can drill into the compound without losing the
+    /// current char detail page.
+    @State private var peekWord: WordEntry? = nil
     /// Graphics loaded just so we can compute a component colour map for
     /// the hero panel — `HanziStrokeView` does its own independent load.
     @State private var graphics: MMAGraphics? = nil
@@ -42,6 +51,8 @@ struct CharacterDetailView: View {
                 meaningRow
                 strokeControls
                 practiceThisRow
+                knowThisCharacterRow
+                dongEtymologySection
                 if let etymology = character.etymology {
                     etymologySection(etymology)
                 } else if character.radical != nil || character.variant != nil {
@@ -77,6 +88,10 @@ struct CharacterDetailView: View {
             AddToListSheet(character: character)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(item: $peekWord) { word in
+            WordDetailSheet(word: word)
+                .presentationDetents([.medium, .large])
+        }
         .fullScreenCover(item: $practiceSession) { s in
             WritingSessionView(session: s) { practiceSession = nil }
         }
@@ -92,15 +107,29 @@ struct CharacterDetailView: View {
         .onAppear {
             UserDataController(context: modelContext).noteLookup(character.id)
         }
+        .onChange(of: character.canonicalID) { _, _ in
+            // Navigating to a different character — clear the
+            // "marked known" sticky so the button is actionable
+            // again on the new page.
+            justMarkedKnown = false
+        }
     }
 
     // MARK: - Subviews
 
     private var pinyinHeader: some View {
-        Text(character.pinyin)
+        // Shows every recognised reading for chars that have more than
+        // one (得 → "dé / děi / de"). Single-reading chars render the
+        // same string the per-character `pinyin` field carries, so the
+        // header is unchanged for the common case.
+        let display = character.pinyinAllReadings.isEmpty
+            ? character.pinyin
+            : character.pinyinAllReadings
+        return Text(display)
             .font(.system(size: 30, weight: .semibold, design: .serif))
             .foregroundStyle(Theme.accent)
             .frame(maxWidth: .infinity)
+            .multilineTextAlignment(.center)
     }
 
     private var characterPanel: some View {
@@ -332,6 +361,54 @@ struct CharacterDetailView: View {
         }
     }
 
+    /// "I already know this" shortcut — applies an `.easy` SRS grade
+    /// to the character's card without forcing the user through a
+    /// writing session. Useful while browsing the dictionary: if you
+    /// hit a character you already know, you can lock it in so the
+    /// app stops surfacing it as "new". Mirrors the in-session
+    /// markCharacterKnown flow.
+    @ViewBuilder
+    private var knowThisCharacterRow: some View {
+        let card = knownCards.first(where: { $0.characterID == character.canonicalID })
+        let alreadyMastered = card?.state == .mastered
+        let alreadyKnown = justMarkedKnown || alreadyMastered
+        Button {
+            guard !alreadyKnown else { return }
+            let controller = UserDataController(context: modelContext)
+            let card = controller.ensureCard(for: character.canonicalID)
+            SRSEngine.apply(grade: .easy, to: card)
+            try? modelContext.save()
+            justMarkedKnown = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: alreadyKnown
+                      ? "checkmark.seal.fill"
+                      : "checkmark.circle")
+                Text(alreadyKnown
+                     ? (alreadyMastered ? "Mastered — already in your deck"
+                                        : "Marked as known")
+                     : "I already know \(character.char)")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(alreadyKnown ? Theme.accent : .primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Theme.accent.opacity(alreadyKnown ? 0.3 : 0.6),
+                            lineWidth: 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(alreadyKnown
+                                  ? Theme.accent.opacity(0.08)
+                                  : Color.clear)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(alreadyKnown)
+    }
+
     private func practiceThisButton(title: String,
                                     systemImage: String,
                                     isPrimary: Bool,
@@ -455,12 +532,112 @@ struct CharacterDetailView: View {
         }
     }
 
-    private func sentenceRow(_ sentence: SentencePair) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top, spacing: 8) {
-                Text(sentence.chinese)
+    /// Render `sentence` with each word/character as its own tappable
+    /// chip — single hanzi push a fresh `CharacterDetailView`; known
+    /// multi-char words open the word detail sheet. Punctuation and
+    /// Latin glyphs render as plain text. Uses a `FlowLayout` so the
+    /// sentence wraps naturally on narrow screens.
+    @ViewBuilder
+    private func tappableSentence(_ sentence: String) -> some View {
+        let tokens = sentenceTokens(sentence)
+        FlowLayout(hSpacing: 1, vSpacing: 4) {
+            ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+                sentenceTokenView(token)
+            }
+        }
+    }
+
+    /// One token slice of an example sentence. Multi-char words point
+    /// to a `WordEntry`; single hanzi point to a `HanziCharacter`
+    /// (when we have one); everything else is opaque text.
+    private enum SentenceToken {
+        case word(WordEntry, display: String)
+        case character(HanziCharacter, display: String)
+        case rawHanzi(String)           // hanzi not in MMA (rare)
+        case other(String)              // punctuation / Latin / digit
+    }
+
+    private func sentenceTokens(_ sentence: String) -> [SentenceToken] {
+        // Split into runs of contiguous hanzi vs. non-hanzi. Each
+        // hanzi run is greedy-tokenised against WordDictionary so 妈妈
+        // / 北京 stay together.
+        var out: [SentenceToken] = []
+        var buffer: [Character] = []
+        let flush = { (buf: [Character]) -> [SentenceToken] in
+            guard !buf.isEmpty else { return [] }
+            let chars = String(buf)
+            let words = WordDictionary.shared.tokenize(chars)
+            var tokens: [SentenceToken] = []
+            for w in words {
+                if w.count > 1, let entry = WordDictionary.shared.entry(for: w) {
+                    tokens.append(.word(entry, display: self.store.displayedWord(w)))
+                } else if let c = self.store.character(for: w) {
+                    tokens.append(.character(c, display: self.store.displayedWord(w)))
+                } else {
+                    tokens.append(.rawHanzi(self.store.displayedWord(w)))
+                }
+            }
+            return tokens
+        }
+        for ch in sentence {
+            if CharacterStore.isHanzi(String(ch)) {
+                buffer.append(ch)
+            } else {
+                out.append(contentsOf: flush(buffer))
+                buffer.removeAll(keepingCapacity: true)
+                out.append(.other(String(ch)))
+            }
+        }
+        out.append(contentsOf: flush(buffer))
+        return out
+    }
+
+    @ViewBuilder
+    private func sentenceTokenView(_ token: SentenceToken) -> some View {
+        switch token {
+        case .word(let entry, let display):
+            Button {
+                peekWord = entry
+            } label: {
+                Text(display)
                     .font(Theme.hanzi(18))
                     .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+        case .character(let c, let display):
+            // Push a fresh CharacterDetailView; reuses the existing
+            // typed-path destination registered on the Dictionary
+            // navigation stack.
+            NavigationLink {
+                CharacterDetailView(character: c)
+            } label: {
+                Text(display)
+                    .font(Theme.hanzi(18))
+                    .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+        case .rawHanzi(let s):
+            Text(s)
+                .font(Theme.hanzi(18))
+                .foregroundStyle(.primary)
+        case .other(let s):
+            Text(s)
+                .font(Theme.hanzi(18))
+                .foregroundStyle(.primary)
+        }
+    }
+
+    private func sentenceRow(_ sentence: SentencePair) -> some View {
+        // The Tatoeba corpus mixes Simplified and Traditional source
+        // sentences; run the displayed text through the variant
+        // classifier so a user in Simplified mode never sees 來 / 學 /
+        // 愛 etc. when their setting asks for the simplified form.
+        // Pinyin lookup + TTS work on either form, so they keep using
+        // the raw `sentence.chinese`.
+        let displayed = store.displayedSentence(sentence.chinese)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                tappableSentence(displayed)
                 Spacer(minLength: 0)
                 Button {
                     Speech.shared.say("",
@@ -476,6 +653,11 @@ struct CharacterDetailView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Play sentence")
             }
+            // Per-character pinyin reading so the user can read the
+            // sentence even when they don't recognise every hanzi.
+            Text(store.pinyinReading(for: sentence.chinese))
+                .font(.system(size: 12, weight: .semibold, design: .serif))
+                .foregroundStyle(Theme.accent)
             Text(sentence.english)
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
@@ -552,39 +734,100 @@ struct CharacterDetailView: View {
     }
 
     /// Row used when a user-list entry isn't in CC-CEDICT — just the
-    /// word, with a "from your list" hint.
+    /// word, with a "from your list" hint. Tappable to open the
+    /// word's detail sheet (synthesised on the fly from the user's
+    /// custom entry or, if there isn't one, a placeholder).
     private func customWordRow(_ word: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(store.displayedWord(word))
-                .font(Theme.hanzi(22))
-                .foregroundStyle(Theme.accent)
-                .frame(minWidth: 56, alignment: .leading)
-            Text("Custom — no dictionary entry")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+        Button {
+            let custom = UserDataController(context: modelContext).lookupWord(word)
+            peekWord = custom ?? WordEntry(simplified: word,
+                                            traditional: word,
+                                            pinyin: store.pinyinReading(for: word),
+                                            gloss: "Custom — no dictionary entry")
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Text(store.displayedWord(word))
+                    .font(Theme.hanzi(22))
+                    .foregroundStyle(Theme.accent)
+                    .frame(minWidth: 56, alignment: .leading)
+                Text("Custom — no dictionary entry")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 4)
+        .buttonStyle(.plain)
     }
 
+    /// Tappable to open the word's detail sheet — the user can drill
+    /// into 容易 from the 易 detail page without losing their place.
     private func wordExampleRow(_ word: WordEntry) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(store.displayedWord(word.simplified))
-                .font(Theme.hanzi(22))
-                .foregroundStyle(Theme.accent)
-                .frame(minWidth: 56, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(word.pinyin)
-                    .font(.system(size: 13, weight: .semibold))
+        Button {
+            peekWord = word
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Text(store.displayedWord(word.simplified))
+                    .font(Theme.hanzi(22))
                     .foregroundStyle(Theme.accent)
-                Text(word.firstGloss)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .frame(minWidth: 56, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(word.pinyin)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                    Text(word.firstGloss)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
             }
-            Spacer(minLength: 0)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 4)
+        .buttonStyle(.plain)
+    }
+
+    /// Free-form prose explanation from chinese-lexicon / Dong Chinese.
+    /// Complementary to the structured STRUCTURE section below — the
+    /// structured one gives the component breakdown, this gives the
+    /// natural-language "why these parts" story. Hidden when the bundle
+    /// has nothing for this character.
+    @ViewBuilder
+    private var dongEtymologySection: some View {
+        if let note = EtymologyLexicon.shared.notes(for: character.canonicalID) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.book.closed.fill")
+                        .foregroundStyle(Theme.accent)
+                    Text("ETYMOLOGY")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                        .tracking(1.5)
+                }
+                Text(note)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Etymology from Dong Chinese · chinese-lexicon · CC BY-SA 4.0")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.card)
+            )
+        }
     }
 
     private func etymologySection(_ ety: Etymology) -> some View {
@@ -611,9 +854,14 @@ struct CharacterDetailView: View {
                 componentCard(component)
             }
             if let radical = character.radical,
+               radical.char != character.char,
+               radical.char != character.canonicalID,
                !ety.components.contains(where: { $0.char == radical.char }) {
                 // Older curated entries surface a radical that the IDS
                 // decomposition didn't catch — surface it as a part too.
+                // Skip when the radical IS the host (chars like 音, 心,
+                // 山 are their own radical) — listing a character as
+                // its own component is circular and confusing.
                 componentCard(.init(char: radical.char, role: .semantic))
             }
         }

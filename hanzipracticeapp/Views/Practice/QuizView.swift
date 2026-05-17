@@ -87,7 +87,7 @@ struct QuizView: View {
         guard let entry = currentEntry else { return "" }
         if entry.count > 1 {
             if let w = UserDataController(context: modelContext).lookupWord(entry) {
-                return w.gloss
+                return w.displayGloss
             }
             // Unknown word — best we can do is list the constituent chars'
             // individual glosses so the quiz isn't useless.

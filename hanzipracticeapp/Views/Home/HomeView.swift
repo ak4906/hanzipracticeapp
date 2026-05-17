@@ -254,7 +254,7 @@ struct HomeView: View {
     }
 
     private var practiceHSKCeiling: Int {
-        let raw = settingsList.first?.practiceHSKCeiling ?? 1
+        let raw = settingsList.first?.effectivePracticeHSKCeiling ?? 1
         return max(1, min(HSKLevels.maxLevel, raw))
     }
 

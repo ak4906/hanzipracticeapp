@@ -5,6 +5,15 @@
 //  SwiftData models that track everything the user creates: vocabulary lists,
 //  spaced-repetition state, practice history, and recently-viewed characters.
 //
+//  CloudKit notes:
+//    • All `@Attribute(.unique)` annotations have been removed — CloudKit
+//      can't enforce uniqueness, so we de-dup at the controller layer
+//      (fetch-then-insert) and run a one-time merge pass at launch.
+//    • Every stored property has an inline default value so CloudKit can
+//      treat them as nullable / defaultable in the generated CKRecord
+//      schema. Constructors still accept the previous parameter lists
+//      so existing call sites are unchanged.
+//
 
 import Foundation
 import SwiftData
@@ -13,28 +22,30 @@ import SwiftData
 
 @Model
 final class SRSCard {
-    /// The character id (the hanzi itself).
-    @Attribute(.unique) var characterID: String
+    /// The character id (the hanzi itself). De-duped at controller layer
+    /// via `UserDataController.ensureCard(for:)` rather than a SwiftData
+    /// uniqueness constraint, because CloudKit doesn't support them.
+    var characterID: String = ""
 
     /// Days until next review.
-    var interval: Double
+    var interval: Double = 0
     /// SM-2 ease factor.
-    var ease: Double
+    var ease: Double = 2.5
     /// Successful repetitions in a row.
-    var repetitions: Int
+    var repetitions: Int = 0
 
-    var dueDate: Date
+    var dueDate: Date = Date.now
     var lastReviewed: Date?
-    var dateAdded: Date
+    var dateAdded: Date = Date.now
 
     /// 0…1 estimate of how well the user remembers this character; updated
     /// every review using an exponentially-weighted moving average.
-    var mastery: Double
+    var mastery: Double = 0
 
     /// Total review count (any grade).
-    var reviewCount: Int
+    var reviewCount: Int = 0
     /// Number of "again" grades (mistakes).
-    var lapseCount: Int
+    var lapseCount: Int = 0
 
     init(characterID: String,
          interval: Double = 0,
@@ -86,31 +97,32 @@ final class SRSCard {
 /// 容易 fluently while still struggling to write it, and vice versa.
 @Model
 final class SRSQuizCard {
-    /// Composite key — `"<entry>:<mode>"` — so SwiftData can enforce
-    /// "one card per (entry, mode)" with its single-column unique
-    /// constraint. Always set by the initialiser; never edited.
-    @Attribute(.unique) var key: String
+    /// Composite key — `"<entry>:<mode>"`. Used as the natural-key for
+    /// dedup at the controller layer; CloudKit doesn't enforce
+    /// uniqueness so the merge pass at launch reconciles any
+    /// duplicates that arrive from another device.
+    var key: String = ""
     /// The entry this card belongs to. Single char ("我") or word ("容易"),
     /// always in the canonical (Simplified) form.
-    var entryKey: String
+    var entryKey: String = ""
     /// Which quiz mode this card tracks. Stored as a string so unknown
     /// values from a future build round-trip cleanly.
-    var quizModeRaw: String
+    var quizModeRaw: String = QuizMode.reading.rawValue
 
     /// Days until next review.
-    var interval: Double
+    var interval: Double = 0
     /// SM-2 ease factor.
-    var ease: Double
+    var ease: Double = 2.5
     /// Successful repetitions in a row.
-    var repetitions: Int
+    var repetitions: Int = 0
 
-    var dueDate: Date
+    var dueDate: Date = Date.now
     var lastReviewed: Date?
-    var dateAdded: Date
+    var dateAdded: Date = Date.now
 
-    var mastery: Double
-    var reviewCount: Int
-    var lapseCount: Int
+    var mastery: Double = 0
+    var reviewCount: Int = 0
+    var lapseCount: Int = 0
 
     init(entryKey: String,
          quizMode: QuizMode,
@@ -196,17 +208,17 @@ enum QuizMode: String, CaseIterable, Identifiable, Hashable, Sendable {
 /// compound nicknames, slang, brand transliterations, etc.).
 @Model
 final class CustomWordEntry {
-    /// Canonical (Simplified) word string. Unique so the user can only
-    /// have one definition per word.
-    @Attribute(.unique) var word: String
+    /// Canonical (Simplified) word string. De-duped at the controller
+    /// layer (CloudKit doesn't enforce uniqueness).
+    var word: String = ""
     /// User-supplied pinyin (tone marks expected; not validated).
-    var customPinyin: String
+    var customPinyin: String = ""
     /// User-supplied English meaning.
-    var customMeaning: String
+    var customMeaning: String = ""
     /// Optional traditional rendering — falls back to per-char conversion
     /// when nil.
     var customTraditional: String?
-    var dateAdded: Date
+    var dateAdded: Date = Date.now
 
     init(word: String,
          customPinyin: String,
@@ -224,20 +236,23 @@ final class CustomWordEntry {
 
 @Model
 final class VocabularyList {
-    @Attribute(.unique) var id: UUID
-    var name: String
-    var detail: String
+    /// Stable identifier — UUIDs are collision-resistant enough that we
+    /// don't need a SwiftData uniqueness constraint, and removing it is
+    /// what CloudKit needs anyway.
+    var id: UUID = UUID()
+    var name: String = ""
+    var detail: String = ""
     /// SF Symbol name shown on the list tile.
-    var symbol: String
+    var symbol: String = "book.closed.fill"
     /// Hex colour code (`0xRRGGBB`) for the list tile accent.
-    var colorHex: Int
-    var dateCreated: Date
+    var colorHex: Int = 0x266358
+    var dateCreated: Date = Date.now
     /// Manual sort order on the Manage lists screen (lower = higher on screen).
-    var sortRank: Int
+    var sortRank: Int = 0
     /// Legacy single-character ids stored as an ordered array. Kept so old
     /// lists keep working — every read goes through `effectiveEntries` which
     /// falls back to this when `entries` is nil. New writes go to `entries`.
-    var characterIDs: [String]
+    var characterIDs: [String] = []
     /// Each entry is a *word* (one or more hanzi) — the simplified form,
     /// e.g. "容易" or "你好". Optional so existing rows lightweight-migrate.
     var entries: [String]?
@@ -301,17 +316,19 @@ extension Array where Element == VocabularyList {
 
 @Model
 final class PracticeRecord {
-    @Attribute(.unique) var id: UUID
-    var characterID: String
-    var date: Date
+    /// UUID identifier — collision-resistant enough that no SwiftData
+    /// uniqueness constraint is needed.
+    var id: UUID = UUID()
+    var characterID: String = ""
+    var date: Date = Date.now
     /// 0…1 overall accuracy of the attempt.
-    var accuracy: Double
+    var accuracy: Double = 0
     /// Number of strokes the user re-tried before passing.
-    var retries: Int
+    var retries: Int = 0
     /// Seconds spent on this attempt.
-    var duration: Double
+    var duration: Double = 0
     /// "writing", "review", "lookup", …
-    var kind: String
+    var kind: String = "writing"
 
     init(characterID: String,
          accuracy: Double,
@@ -332,8 +349,9 @@ final class PracticeRecord {
 
 @Model
 final class RecentLookup {
-    @Attribute(.unique) var characterID: String
-    var lastViewed: Date
+    /// De-duped at controller layer by `characterID`.
+    var characterID: String = ""
+    var lastViewed: Date = Date.now
 
     init(characterID: String) {
         self.characterID = characterID
@@ -346,24 +364,25 @@ final class RecentLookup {
 @Model
 final class UserSettings {
     /// Daily review cap.
-    var dailyNewLimit: Int
+    var dailyNewLimit: Int = 10
     /// Whether to play stroke order audio cues.
-    var soundsEnabled: Bool
+    var soundsEnabled: Bool = true
     /// Selected writing system. When true, the dictionary, sessions, and
     /// trending lists only show Traditional (繁體) characters; otherwise the
     /// app shows only Simplified (简体) — no mixing.
-    var preferTraditional: Bool
+    var preferTraditional: Bool = false
 
     /// Characters picked for **discovery** flows — Character of the Day,
-    /// random/quick sessions when nothing is due, and “introduce new” pools —
+    /// random/quick sessions when nothing is due, and "introduce new" pools —
     /// are limited to official HSK lists up through this level (1…6).
     /// Raise as you advance; SRS cards you already own are unaffected.
-    //
-    // Note: no property-level default here. SwiftData lightweight migration
-    // doesn't always honour `Int = 1` defaults — leaving inserts in a state
-    // where `try context.save()` throws and the row never materialises, which
-    // showed up as a permanent "Loading settings…" on Profile.
-    var practiceHSKCeiling: Int
+    ///
+    /// Was originally property-default-less because lightweight migration
+    /// trouble; CloudKit needs a default though, and current SwiftData
+    /// versions handle this case cleanly. `effectivePracticeHSKCeiling`
+    /// provides a non-zero floor if a sync-arriving row ever comes in
+    /// uninitialised.
+    var practiceHSKCeiling: Int = 1
 
     /// How many due cards to surface in a single "Today's Review" session.
     /// Optional so existing rows can lightweight-migrate (nil = use default).
@@ -425,11 +444,62 @@ final class UserSettings {
     /// Effective values with sensible fallbacks — use these from views.
     var effectiveDailyReviewLimit: Int { dailyReviewLimit ?? 10 }
     var effectivePracticeChunkSize: Int { practiceChunkSize ?? 3 }
+    var effectivePracticeHSKCeiling: Int {
+        // Floor at 1 in case a freshly-synced CloudKit row arrives
+        // with the default sentinel (0). Existing local rows store the
+        // real value already.
+        max(1, practiceHSKCeiling)
+    }
     var effectiveWritingDirection: WritingDirection {
         WritingDirection(rawValue: writingDirectionRaw ?? "") ?? .horizontal
     }
     var effectivePracticeCanvasFit: PracticeCanvasFit {
         PracticeCanvasFit(rawValue: practiceCanvasFitRaw ?? "") ?? .fit
+    }
+}
+
+// MARK: - User profile
+
+/// Personal identity for the Profile tab — display name + chosen
+/// avatar glyph. Kept deliberately small and CloudKit-friendly (all
+/// stored properties have defaults, no `.unique`) so this model can be
+/// the first to ride the upcoming `.cloudKit` SwiftData configuration
+/// without a schema migration.
+///
+/// The avatar is currently a single Chinese character or emoji rather
+/// than an image — keeps storage tiny, syncs instantly, and matches
+/// the visual register of the rest of the app. A full
+/// `Data`-backed picture can come later once we have a path for
+/// shrinking + caching it through CloudKit.
+@Model
+final class UserProfile {
+    /// Friendly display name, shown at the top of the Profile tab and
+    /// reusable elsewhere (e.g. session greetings).
+    var displayName: String = "Hanzi Learner"
+
+    /// Single glyph or emoji rendered inside the avatar circle.
+    /// Defaults to 学 ("study") — same character the older hard-coded
+    /// header used, so existing installs look unchanged after the
+    /// first sync.
+    var avatarSymbol: String = "学"
+
+    /// Background tint for the avatar circle. Stored as a packed
+    /// 0xRRGGBB int so SwiftData / CloudKit don't need a custom
+    /// `Color` codec.
+    var avatarColorHex: Int = 0x266358
+
+    /// When the profile row was created. Useful for "member since"
+    /// chrome and for tie-breaking duplicate rows that could appear
+    /// briefly during the first CloudKit merge.
+    var dateCreated: Date = Date.now
+
+    init(displayName: String = "Hanzi Learner",
+         avatarSymbol: String = "学",
+         avatarColorHex: Int = 0x266358) {
+        self.displayName = displayName
+        self.avatarSymbol = avatarSymbol
+        self.avatarColorHex = avatarColorHex
+        self.dateCreated = .now
     }
 }
 

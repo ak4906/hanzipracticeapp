@@ -312,4 +312,30 @@ struct UserDataController {
         }
         return s
     }
+
+    // MARK: - User profile
+
+    /// Fetch (or first-time create) the singleton `UserProfile` row.
+    /// Mirrors `settings()` — once iCloud sync is enabled, duplicates
+    /// can appear briefly during the first merge from a second device;
+    /// we keep the *earliest* (smallest `dateCreated`) to stay
+    /// deterministic.
+    func userProfile() -> UserProfile {
+        var descriptor = FetchDescriptor<UserProfile>(
+            sortBy: [SortDescriptor(\.dateCreated, order: .forward)]
+        )
+        descriptor.fetchLimit = 1
+        if let existing = try? context.fetch(descriptor).first {
+            return existing
+        }
+        let p = UserProfile()
+        context.insert(p)
+        context.processPendingChanges()
+        do {
+            try context.save()
+        } catch {
+            print("HanziPractice: failed to save initial UserProfile — \(error)")
+        }
+        return p
+    }
 }

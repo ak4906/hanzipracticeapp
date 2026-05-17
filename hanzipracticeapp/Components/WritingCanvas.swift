@@ -212,6 +212,11 @@ final class WritingCanvasModel {
 struct WritingCanvas: View {
     @Bindable var model: WritingCanvasModel
     var onCompletion: ((WritingCanvasModel) -> Void)? = nil
+    /// When false the canvas renders the saved strokes + template but
+    /// ignores drag input — used by the in-session review mode where
+    /// the user is inspecting a past attempt and shouldn't be able to
+    /// stack new strokes on top of it.
+    var isInteractive: Bool = true
 
     @State private var currentStroke: [CGPoint] = []
     @State private var flashColor: Color? = nil
@@ -236,7 +241,8 @@ struct WritingCanvas: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
+                isInteractive
+                ? DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         let p = CGPoint(x: value.location.x / side,
                                         y: value.location.y / side)
@@ -254,6 +260,7 @@ struct WritingCanvas: View {
                         flashFeedback(for: result)
                         if model.isComplete { onCompletion?(model) }
                     }
+                : nil
             )
         }
         .aspectRatio(1, contentMode: .fit)

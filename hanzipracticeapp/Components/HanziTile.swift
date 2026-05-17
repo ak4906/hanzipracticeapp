@@ -148,4 +148,24 @@ extension String {
 
     /// Alias used inside etymology blurbs.
     var firstGloss: String { firstPart }
+
+    /// Meaning text suited for quiz chips and grading sheets — keeps
+    /// multi-synonym lists intact ("quite, very, awfully") instead of
+    /// truncating to the first word the way `firstPart` does, because
+    /// many chars have multiple equally-valid teaching meanings that a
+    /// learner would all recognise. Falls back to splitting on `;`
+    /// (CC-CEDICT's sense separator) and then on `,` only if the
+    /// result is still too long for a chip.
+    var quizFriendly: String {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count <= 40 { return trimmed }
+        if let semi = trimmed.firstIndex(of: ";") {
+            let first = trimmed[..<semi].trimmingCharacters(in: .whitespaces)
+            if first.count <= 40 { return first }
+        }
+        if let comma = trimmed.firstIndex(of: ",") {
+            return trimmed[..<comma].trimmingCharacters(in: .whitespaces)
+        }
+        return String(trimmed.prefix(40))
+    }
 }

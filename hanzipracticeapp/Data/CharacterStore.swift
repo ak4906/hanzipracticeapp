@@ -112,6 +112,145 @@ final class CharacterStore {
         })
     }
 
+    /// Variant transformation for free-form Mandarin text — e.g. the
+    /// example sentences pulled from Tatoeba, which mix Simplified and
+    /// Traditional source content. Runs every CJK character through the
+    /// OpenCC mapping and passes punctuation / Latin / digits through
+    /// unchanged. Without this, a user in Simplified mode would see
+    /// 「來」 in a sentence even though their settings ask for 来.
+    func displayedSentence(_ sentence: String) -> String {
+        let classifier = VariantClassifier.shared
+        let v = variant
+        return String(sentence.map { ch -> Character in
+            let mapped = classifier.displayed(String(ch), in: v)
+            return mapped.first ?? ch
+        })
+    }
+
+    /// Pinyin transliteration of a Chinese sentence. Goal: produce
+    /// reading aids that match what a native speaker would actually
+    /// say + how a textbook would print it, not a brittle
+    /// char-by-char fallback that emits raw hanzi when MMA hasn't
+    /// catalogued an obscure character.
+    ///
+    /// Strategy:
+    ///   1. Greedy-tokenise into words (CC-CEDICT entries) so 妈妈 is
+    ///      one token, not two. We then use the word's CEDICT pinyin
+    ///      directly — that preserves capitalisation for proper nouns
+    ///      (北京 → "Běijīng", 周 → surname "Zhōu" when the entry
+    ///      flags it) and neutral tones (妈 in 妈妈 reads "ma" not
+    ///      "mā"). Adjacent syllables inside the same word are
+    ///      space-collapsed so the textbook form "māma" reads as one
+    ///      word, not "mā ma".
+    ///   2. Per-character fallback: MMA primary → chinese-lexicon
+    ///      single-char short reading → `?` placeholder. We never
+    ///      emit the raw hanzi; the prior fallback was leaking 肏 /
+    ///      屄 / other rare chars into the pinyin line.
+    ///   3. 一 / 不 sandhi post-pass on per-character segments so 不是
+    ///      reads "búshì" even when it's tokenised as two singletons.
+    func pinyinReading(for sentence: String) -> String {
+        // Step 1 — segment into runs of hanzi and non-hanzi glyphs.
+        // Each hanzi run is tokenised against the word dictionary;
+        // non-hanzi glyphs pass through verbatim.
+        var pieces: [String] = []
+        var buffer: [Character] = []
+        let flushBuffer: ([Character]) -> [String] = { buf in
+            guard !buf.isEmpty else { return [] }
+            return self.tokenisedPinyin(forHanziRun: String(buf))
+        }
+        for ch in sentence {
+            if Self.isHanzi(String(ch)) {
+                buffer.append(ch)
+            } else {
+                pieces.append(contentsOf: flushBuffer(buffer))
+                buffer.removeAll(keepingCapacity: true)
+                pieces.append(String(ch))
+            }
+        }
+        pieces.append(contentsOf: flushBuffer(buffer))
+        return pieces.joined()
+    }
+
+    /// Build the pinyin string for a run of contiguous hanzi. Each
+    /// returned element is either a word-level pinyin token (already
+    /// space-collapsed) or a single-char fallback, with a leading
+    /// space prepended on every element after the first so the caller
+    /// can just `.joined()` them.
+    private func tokenisedPinyin(forHanziRun run: String) -> [String] {
+        // WordDictionary's tokenizer does longest-match greedy
+        // segmentation; we then look up each word in the dictionary
+        // to get its pinyin (which is already capitalised + neutral-
+        // toned correctly per CEDICT). Single-char tokens get the
+        // existing per-character logic + tone sandhi.
+        let words = WordDictionary.shared.tokenize(run)
+        // Build per-syllable tokens for the sandhi pass — we want 一
+        // / 不 sandhi to fire across word boundaries too (e.g. "一年"
+        // when it's one token from the lexicon AND "一" alone before
+        // a 4th-tone char in another segment).
+        var sandhiTokens: [(char: String, pinyin: String)] = []
+        var tokenSpans: [(wordIdx: Int, sandhiStart: Int, sandhiEnd: Int)] = []
+        for (wi, word) in words.enumerated() {
+            let start = sandhiTokens.count
+            // Word-level entry: pull its CEDICT pinyin and split into
+            // syllables for sandhi alignment.
+            if word.count > 1, let entry = WordDictionary.shared.entry(for: word) {
+                let syllables = entry.pinyin.split(separator: " ").map(String.init)
+                let chars = Array(word).map(String.init)
+                // Best-effort align: when the syllable count matches
+                // the char count (almost always true for CEDICT
+                // entries), pair them up. Otherwise fall back to
+                // single-char lookups for this word so sandhi
+                // alignment stays stable.
+                if syllables.count == chars.count {
+                    for (i, ch) in chars.enumerated() {
+                        sandhiTokens.append((ch, syllables[i]))
+                    }
+                } else {
+                    for ch in chars {
+                        sandhiTokens.append((ch, perCharPinyin(ch) ?? "?"))
+                    }
+                }
+            } else {
+                let ch = word
+                sandhiTokens.append((ch, perCharPinyin(ch) ?? "?"))
+            }
+            tokenSpans.append((wi, start, sandhiTokens.count))
+        }
+        // Apply 一 / 不 sandhi across the full sentence span.
+        ToneSandhi.apply(to: &sandhiTokens)
+        // Re-emit per word: collapse word-internal syllables to no
+        // spaces ("māma"), and add a single leading space between
+        // separate words so the joined output reads "nǐ māma ne".
+        var out: [String] = []
+        for (wi, start, end) in tokenSpans {
+            guard end > start else { continue }
+            let chunk = sandhiTokens[start..<end].map(\.pinyin).joined()
+            let prefix = (wi == 0) ? "" : " "
+            out.append(prefix + chunk)
+        }
+        return out
+    }
+
+    /// Per-character pinyin lookup with a full fallback chain:
+    /// MMA-primary → chinese-lexicon's first reading → nil. Used by
+    /// the sentence tokeniser; the nil case is replaced with `?` so
+    /// we never leak the raw hanzi into the pinyin line.
+    private func perCharPinyin(_ char: String) -> String? {
+        if let c = character(for: char), !c.pinyin.isEmpty {
+            return c.pinyin
+        }
+        // The single-char definitions bundle covers a much wider set
+        // than MMA (10.8k vs ~9k). Take the first reading from its
+        // `pinyinReadings` field — it's already tone-marked.
+        if let def = SingleCharDefinitions.shared.entry(for: char) {
+            let first = def.pinyinReadings
+                .split(separator: ";", maxSplits: 1)
+                .first.map { $0.trimmingCharacters(in: .whitespaces) }
+            if let f = first, !f.isEmpty { return f }
+        }
+        return nil
+    }
+
     // MARK: - Loading
 
     /// Loads MMA data + builds the search index on a background task.
@@ -216,7 +355,38 @@ final class CharacterStore {
         guard curated != nil || mma != nil else { return nil }
 
         let pinyinTone = curated?.pinyin ?? mma?.pinyin.first ?? ""
-        let meaning = curated?.meaning ?? mma?.definition ?? ""
+        // Meaning resolution order:
+        //   1. SeedCharacters curated overlay (rich hand-written rows)
+        //   2. MeaningOverrides table — small curated patch for chars
+        //      where chinese-lexicon picked an etymologically correct
+        //      but classroom-rare sense (周 → "to circle" should be
+        //      "week, cycle"; 着 → "to touch" should mention the verb
+        //      suffix usage students actually meet first).
+        //   3. chinese-lexicon `short` — learner-friendly default for
+        //      ~10k chars (better than MMA's Classical glosses).
+        //   4. MMA `definition` — final fallback for rare hanzi.
+        let lexiconEntry = SingleCharDefinitions.shared.entry(for: canonical)
+            ?? SingleCharDefinitions.shared.entry(for: displayed)
+        let meaning = curated?.meaning
+            ?? MeaningOverrides.meaning(for: canonical)
+            ?? MeaningOverrides.meaning(for: displayed)
+            ?? lexiconEntry?.short
+            ?? mma?.definition
+            ?? ""
+        // Multi-reading display string. The lexicon stores readings
+        // semicolon-separated ("dé; děi; de"); we surface them with a
+        // slash divider in the UI so chars like 得 / 行 / 着 show every
+        // valid pronunciation in the detail header instead of just
+        // their primary one.
+        let pinyinAllReadings: String = {
+            guard let readings = lexiconEntry?.pinyinReadings, !readings.isEmpty else {
+                return pinyinTone
+            }
+            let parts = readings.split(separator: ";").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+            return parts.isEmpty ? pinyinTone : parts.joined(separator: " / ")
+        }()
 
         let radical: RelatedCharacter? = curated?.radical
             ?? mma?.radical.map { RelatedCharacter(char: $0, label: "Radical") }
@@ -240,6 +410,7 @@ final class CharacterStore {
             char: displayed,
             pinyin: pinyinTone,
             pinyinToneless: pinyinTone.toneStripped,
+            pinyinAllReadings: pinyinAllReadings,
             meaning: meaning,
             hskLevel: hskLevel,
             strokeCount: strokeCount,
@@ -463,13 +634,41 @@ final class CharacterStore {
         // ask `character(for:)` to render them in the active variant so the
         // Traditional user sees 學/愛 instead of an empty grid.
         //
-        // Rotate the visible set by day-of-year so the Dictionary doesn't
-        // show the same 12 characters forever — gives a small daily reason
-        // to return and explore. Deterministic per-day so a user who opens
-        // the app twice in a day sees the same set both times.
-        let pool = SeedCharacters.curated
+        // Pool composition (broadest first, so rotation has somewhere to
+        // go — the previous version pulled only `trending`-tagged seeds
+        // and there were just 7 of them, so the daily shuffle produced
+        // the same 7 forever):
+        //   1. Curated chars tagged `trending` (top priority, always appear
+        //      more often via duplication-in-pool).
+        //   2. Curated chars tagged `common` — anything teachable we've
+        //      hand-written examples for.
+        //   3. HSK 1 + HSK 2 characters from the bundled HSK index, so
+        //      learners always see beginner-friendly hanzi even when the
+        //      curated pool is exhausted.
+        // Deduped by canonical id, then shuffled by day-of-year so the
+        // user gets a fresh-feeling daily set deterministically.
+        var pool: [HanziCharacter] = []
+        var seen = Set<String>()
+        // Curated, prioritised by tag.
+        let curatedTrending = SeedCharacters.curated
             .filter { $0.tags.contains("trending") }
-            .compactMap { character(for: $0.char) }
+        let curatedCommon = SeedCharacters.curated
+            .filter { $0.tags.contains("common") && !$0.tags.contains("trending") }
+        for seed in curatedTrending + curatedCommon {
+            guard let c = character(for: seed.char),
+                  seen.insert(c.canonicalID).inserted else { continue }
+            pool.append(c)
+        }
+        // HSK 1-2 fill so even users who've seen every curated tile keep
+        // discovering new ones across rotations.
+        let table = HSKLevels.shared
+        for level in 1...2 {
+            for id in table.byLevel[level] ?? [] {
+                guard let c = character(for: id),
+                      seen.insert(c.canonicalID).inserted else { continue }
+                pool.append(c)
+            }
+        }
         guard pool.count > 12 else { return pool }
         let day = Calendar.current.ordinality(of: .day, in: .year, for: .now) ?? 1
         var generator = SeededGenerator(seed: UInt64(day))

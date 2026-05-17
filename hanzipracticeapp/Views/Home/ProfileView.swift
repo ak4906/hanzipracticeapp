@@ -15,6 +15,9 @@ struct ProfileView: View {
     @Query private var settingsList: [UserSettings]
     @Query private var cards: [SRSCard]
     @Query private var records: [PracticeRecord]
+    @Query private var profiles: [UserProfile]
+
+    @State private var editingProfile: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -51,29 +54,51 @@ struct ProfileView: View {
                 }
             }
             .navigationTitle("Profile")
+            .sheet(isPresented: $editingProfile) {
+                if let profile = profiles.first {
+                    ProfileEditorSheet(profile: profile)
+                        .presentationDetents([.medium, .large])
+                }
+            }
         }
         .onAppear {
             _ = UserDataController(context: modelContext).settings()
+            // Materialise the profile row eagerly so the header
+            // doesn't flash a placeholder on first launch.
+            _ = UserDataController(context: modelContext).userProfile()
         }
     }
 
     private var profileHeader: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle().fill(Theme.accentSoft).frame(width: 64, height: 64)
-                Text("学")
-                    .font(Theme.hanzi(28, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Hanzi Learner")
-                    .font(.system(size: 18, weight: .bold))
-                Text("\(cards.filter { $0.state == .mastered }.count) mastered • \(streak)-day streak")
-                    .font(.system(size: 13))
+        let profile = profiles.first
+        let displayName = profile?.displayName ?? "Hanzi Learner"
+        let symbol = profile?.avatarSymbol ?? "学"
+        let color = profile.map { Color(hex: UInt32($0.avatarColorHex)) } ?? Theme.accent
+        return Button {
+            editingProfile = true
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle().fill(color.opacity(0.18)).frame(width: 64, height: 64)
+                    Text(symbol)
+                        .font(Theme.hanzi(28, weight: .semibold))
+                        .foregroundStyle(color)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(displayName)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.primary)
+                    Text("\(cards.filter { $0.state == .mastered }.count) mastered • \(streak)-day streak")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "pencil.circle")
+                    .font(.system(size: 18))
                     .foregroundStyle(.secondary)
             }
-            Spacer()
         }
+        .buttonStyle(.plain)
         .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
     }
 
@@ -300,5 +325,157 @@ struct DangerZoneView: View {
             for r in recents { context.delete(r) }
         }
         try? context.save()
+    }
+}
+
+// MARK: - Profile editor
+
+/// Sheet for editing the user's display name + avatar glyph. The
+/// avatar is a single character or emoji — keeps the underlying
+/// `UserProfile` row small and CloudKit-syncable. Full picture upload
+/// can come in a follow-up once we have a path for shrinking / caching
+/// images through CloudKit.
+struct ProfileEditorSheet: View {
+    @Bindable var profile: UserProfile
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+
+    @State private var workingName: String = ""
+    @State private var workingSymbol: String = ""
+    @State private var workingColorHex: Int = 0x266358
+
+    /// Curated palette — themed greens / blues / warm accents that
+    /// look good on the avatar circle. Hex packed so they line up
+    /// with the `UserProfile.avatarColorHex` storage.
+    private let colorPalette: [Int] = [
+        0x266358, 0x3F8C7A, 0x6789C2, 0xC9A13C,
+        0xC9605D, 0x8D6CD0, 0x4A5060, 0x9C3F60,
+    ]
+
+    /// Quick-pick glyphs. Common stand-ins until we have image
+    /// picker / CloudKit asset support.
+    private let glyphPalette: [String] = [
+        "学", "汉", "字", "书", "笔", "心", "好", "永",
+        "🐯", "🐉", "🌸", "🍵", "📚", "✏️", "⭐️", "🔥",
+    ]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Spacer()
+                        ZStack {
+                            Circle()
+                                .fill(Color(hex: UInt32(workingColorHex)).opacity(0.2))
+                                .frame(width: 96, height: 96)
+                            Text(workingSymbol.isEmpty ? "?" : workingSymbol)
+                                .font(Theme.hanzi(48, weight: .semibold))
+                                .foregroundStyle(Color(hex: UInt32(workingColorHex)))
+                        }
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                }
+
+                Section("Display name") {
+                    TextField("Your name", text: $workingName)
+                        .textInputAutocapitalization(.words)
+                }
+
+                Section("Avatar glyph") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 44, maximum: 56),
+                                                  spacing: 8)],
+                              spacing: 8) {
+                        ForEach(glyphPalette, id: \.self) { glyph in
+                            Button {
+                                workingSymbol = glyph
+                            } label: {
+                                Text(glyph)
+                                    .font(Theme.hanzi(22))
+                                    .frame(width: 44, height: 44)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(workingSymbol == glyph
+                                                  ? Color(hex: UInt32(workingColorHex)).opacity(0.2)
+                                                  : Color.secondary.opacity(0.08))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(workingSymbol == glyph
+                                                    ? Color(hex: UInt32(workingColorHex))
+                                                    : Color.clear,
+                                                    lineWidth: 2)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    HStack {
+                        Text("Or type your own")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        TextField("符", text: $workingSymbol)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: 80)
+                    }
+                }
+
+                Section("Colour") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 36, maximum: 44),
+                                                  spacing: 10)],
+                              spacing: 10) {
+                        ForEach(colorPalette, id: \.self) { hex in
+                            Button { workingColorHex = hex } label: {
+                                Circle()
+                                    .fill(Color(hex: UInt32(hex)))
+                                    .frame(width: 32, height: 32)
+                                    .overlay(
+                                        Circle().stroke(
+                                            workingColorHex == hex
+                                                ? Color.primary
+                                                : Color.clear,
+                                            lineWidth: 2.5
+                                        )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("Edit Profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") {
+                        let trimmed = workingName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        profile.displayName = trimmed.isEmpty ? "Hanzi Learner" : trimmed
+                        // Clamp to a single grapheme so multi-emoji
+                        // strings (and accidental long input) don't
+                        // blow out the avatar circle.
+                        let glyph = workingSymbol.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let first = glyph.first {
+                            profile.avatarSymbol = String(first)
+                        }
+                        profile.avatarColorHex = workingColorHex
+                        try? modelContext.save()
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .onAppear {
+            workingName = profile.displayName
+            workingSymbol = profile.avatarSymbol
+            workingColorHex = profile.avatarColorHex
+        }
     }
 }
